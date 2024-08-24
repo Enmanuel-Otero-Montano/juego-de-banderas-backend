@@ -1,0 +1,12 @@
+.env
+.idea/
+
+# Ignorar carpetas de caché de Python
+__pycache__/
+
+# Ignorar entornos virtuales de Python
+banderas-paises-regiones-venv/
+
+# Ignorar configuraciones de alembic si no deseas versionarlas
+alembic.ini
+
