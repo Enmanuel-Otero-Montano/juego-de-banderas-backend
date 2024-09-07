@@ -1,14 +1,19 @@
 from typing import Annotated
 from datetime import timedelta, datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, Body, Form, UploadFile, File
 from fastapi.security import HTTPBasic, OAuth2PasswordRequestForm, OAuth2PasswordBearer
+from fastapi.responses import RedirectResponse, Response
 from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 from dotenv import load_dotenv
+from fastapi.middleware.cors import CORSMiddleware
 
 import smtplib
 from email.mime.text import MIMEText
+
+from PIL import Image
+from io import BytesIO
 
 from repository import register_login, scores_repo
 from schemas import user_schema, token
@@ -17,6 +22,8 @@ import jwt
 import os
 
 from jwt.exceptions import InvalidTokenError
+
+from schemas.user_schema import UserRegisterResponse
 
 # from schemas.overall_score_schema import ScoreRequest
 
@@ -36,9 +43,18 @@ SMTP_PORT = os.getenv('SMTP_PORT')
 SENDER_EMAIL = os.getenv('SENDER_EMAIL')
 SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
 VERIFICATION_LINK = os.getenv('VERIFICATION_LINK')
+BASE_URL = os.getenv('BASE_URL')
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[BASE_URL],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def get_db():
@@ -49,25 +65,36 @@ def get_db():
         db.close()
 
 
-@app.post("/register", response_model=user_schema.User)
-def register_user(user: user_schema.UserCreate, db: Session = Depends(get_db)):
-    db_user = register_login.check_user_exist(db, user.email)
+@app.post("/register", response_model=UserRegisterResponse)
+async def register_user(username: Annotated[str, Form()], full_name: Annotated[str, Form()], email: Annotated[str, Form()], password: Annotated[str, Form()], profile_image: Annotated[UploadFile, File()], db: Session = Depends(get_db)):
+    # TODO: Tengo que agregar una validación para el nombre de usuario
+    db_user = register_login.check_user_exist(db, email)
+    print(username, full_name, email, password, profile_image, "username, full_name, email, password, profile_image")
+    image_content = await profile_image.read()
+    print(f"Image size: {len(image_content)} bytes")  # Verificar el tamaño de la imagen
+
     if db_user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
-
-    hashed_password = get_password_hash(user.password)
+    
+    if len(image_content) > 2 * 1024 * 1024:  # Limite de 2MB como ejemplo
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Image too large")
+    
+    hashed_password = get_password_hash(password)
     new_user = models.User(
-        username=user.username,
-        email=user.email,
-        full_name=user.full_name,
-        hashed_password=hashed_password
+        username=username,
+        email=email,
+        full_name=full_name,
+        hashed_password=hashed_password,
+        profile_image=image_content
     )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
 
-    verification_token = create_email_verification_token(user.email)
-    send_verification_email(user.email, verification_token)
+    name = full_name if full_name else username
+
+    verification_token = create_email_verification_token(email)
+    send_verification_email(email, verification_token, name)
     return new_user
 
 
@@ -78,10 +105,27 @@ def create_email_verification_token(email: str):
     return token
 
 
-def send_verification_email(email: str, token: str):
+def send_verification_email(email: str, token: str, name: str):
     verification_link = f"{VERIFICATION_LINK}{token}"
-    subject = "Verificación de correo electrónico"
-    body = f"Haz clic en el siguiente enlace para verificar tu correo: {verification_link}"
+    subject = "¡Bienvenido a Banderas, países y regiones! Verifica tu cuenta para comenzar"
+    body = f"""
+    Hola {name},
+    
+    ¡Gracias por registrarte en Banderas, países y regiones! Estamos felices de que te unas a nuestra comunidad.
+    
+    Para completar tu registro y activar tu cuenta, simplemente haz clic en el siguiente enlace:
+    
+    {verification_link}
+    
+    Si no solicitaste esta cuenta, puedes ignorar este correo.
+    
+    Estamos aquí para ayudarte en cualquier momento. Si tienes alguna pregunta, no dudes en responder a este correo.
+    
+    ¡Esperamos que disfrutes de nuestra plataforma!
+    
+    Saludos cordiales,
+    El equipo de Banderas, países y regiones
+    """
 
     smtp_server = SMTP_SERVER
     smtp_port = SMTP_PORT
@@ -121,11 +165,11 @@ def verify_email(token: str, db: Session = Depends(get_db)):
     # Marcar el usuario como verificado
     user.is_verified = True
     db.commit()
-    return {"msg": "Email verified successfully"}
+    return RedirectResponse(f"{BASE_URL}/pages/successful-verification.html")
 
 
 @app.post("/resend-verification-email")
-def resend_verification_email(email: str, db: Session = Depends(get_db)):
+def resend_verification_email(email: Annotated[str, Body()], db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.email == email).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
@@ -156,7 +200,7 @@ def get_user(db, username: str):
 
 def authenticate_user(username: str, password: str, db: Session):
     user = get_user(db, username)
-    if not user or not user.is_verified:
+    if not user:
         return False
     if not verify_password(password, user.hashed_password):
         return False
@@ -200,16 +244,43 @@ async def get_current_active_user(current_user: Annotated[user_schema.User, Depe
     return current_user
 
 
-@app.post("/token")
+@app.post("/login")
 async def login_for_access_token(form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
-                                 db: Session = Depends(get_db)) -> token.Token:
+                                 db: Session = Depends(get_db)):
     user = authenticate_user(form_data.username, form_data.password, db)
     if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password",
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail={"message": "Usuario o contraseña incorrectos"},
                             headers={"WWW-Authenticate": "Bearer"}, )
+    if user and not user.is_verified:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail={"message": "Usuario no verificado", "email": user.email},
+                            headers={"WWW-Authenticate": "Bearer"})
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(data={"sub": user.username}, expires_delta=access_token_expires)
-    return token.Token(access_token=access_token, token_type="bearer")
+    full_name = user.full_name if user.full_name else user.username
+    profile_image_url = f"/user/{user.id}/profile_image"
+    return {"access_token": access_token, "token_type": "bearer", "full_name": full_name, "profile_image_url": profile_image_url, "user_id": user.id}
+
+@app.get("/user/{user_id}/profile_image")
+async def get_profile_image(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user or not user.profile_image:
+        raise HTTPException(status_code=404, detail="Image not found")
+    
+    try:
+        image = Image.open(BytesIO(user.profile_image))
+        image_format = image.format
+        if image_format == "JPEG":
+            media_type = "image/jpeg"
+        elif image_format == "PNG":
+            media_type = "image/png"
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported image format")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+
+    return Response(content=user.profile_image, media_type=media_type)
 
 
 @app.get("/users/me", response_model=user_schema.User)
@@ -227,5 +298,5 @@ async def save_overrall_score(current_user: Annotated[user_schema.User, Depends(
 @app.get("/overall-scores", response_model=list[user_schema.OverallScore])
 async def get_overall_score_table(db: Annotated[Session, Depends(get_db)]):
     all_scores = scores_repo.get_overall_score_table(db)
-    print(all_scores,"all_scores")
+    print(all_scores, "all_scores")
     return all_scores

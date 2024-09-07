@@ -35,6 +35,11 @@ class OverallScore(BaseModel):
     class Config:
         orm_mode = True
 
+class UserRegisterResponse(UserBase):
+    id: int
+    is_active: bool
+    full_name: str
+    hashed_password: str
 
 class ScoreRequest(BaseModel):
     score: int
