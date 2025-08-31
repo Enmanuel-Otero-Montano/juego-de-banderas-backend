@@ -15,6 +15,7 @@ class User(database.Base):
     is_verified = Column(Boolean, default=False)
     profile_image = Column(LargeBinary, nullable=True)
     overall_score = relationship("OverallScoreTable", back_populates='user')
+    country = Column(String, nullable=True)
 
 class OverallScoreTable(database.Base):
     __tablename__ = "overall_score_table"

@@ -1,9 +1,10 @@
-from sqlalchemy.orm import Session, joinedload
-
+from sqlalchemy.orm import Session
+from datetime import date
 from db.models import User, OverallScoreTable
 
 
 def save_score(db: Session, score: int, current_user: User):
+    print(current_user, "current_user")
     user_score = db.query(OverallScoreTable).filter(OverallScoreTable.user_id == current_user.id).first()
 
     if user_score:

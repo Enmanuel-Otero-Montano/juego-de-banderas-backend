@@ -2,7 +2,6 @@ from datetime import date
 
 from pydantic import BaseModel, EmailStr
 from typing import Optional
-# from schemas.overall_score_schema import OverallScore
 
 
 
@@ -25,6 +24,22 @@ class User(UserBase):
     class Config:
         orm_mode = True
 
+class UserProfileUpdate(BaseModel):
+    username: Optional[str] = None
+    full_name: Optional[str] = None
+    profile_image: Optional[bytes] = None
+    country: Optional[str] = None
+
+class UserRegisterResponse(UserBase):
+    full_name: str
+    hashed_password: str
+
+class UserEditProfileCurrentData(BaseModel):
+    # Clase que se devuelve en el endpoint que solicita los datos para cargar en el formulario de edición de datos
+    username: Optional[str] = None
+    full_name: Optional[str] = None
+    country: Optional[str] = None
+
 class OverallScore(BaseModel):
     max_score: int
     last_score: int
@@ -34,12 +49,6 @@ class OverallScore(BaseModel):
 
     class Config:
         orm_mode = True
-
-class UserRegisterResponse(UserBase):
-    id: int
-    is_active: bool
-    full_name: str
-    hashed_password: str
 
 class ScoreRequest(BaseModel):
     score: int

@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Optional
 from datetime import timedelta, datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Depends, status, Body, Form, UploadFile, File
@@ -45,7 +45,7 @@ SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
 VERIFICATION_LINK = os.getenv('VERIFICATION_LINK')
 BASE_URL = os.getenv('BASE_URL')
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 app.add_middleware(
@@ -69,9 +69,7 @@ def get_db():
 async def register_user(username: Annotated[str, Form()], full_name: Annotated[str, Form()], email: Annotated[str, Form()], password: Annotated[str, Form()], profile_image: Annotated[UploadFile, File()], db: Session = Depends(get_db)):
     # TODO: Tengo que agregar una validación para el nombre de usuario
     db_user = register_login.check_user_exist(db, email)
-    print(username, full_name, email, password, profile_image, "username, full_name, email, password, profile_image")
     image_content = await profile_image.read()
-    print(f"Image size: {len(image_content)} bytes")  # Verificar el tamaño de la imagen
 
     if db_user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
@@ -99,7 +97,7 @@ async def register_user(username: Annotated[str, Form()], full_name: Annotated[s
 
 
 def create_email_verification_token(email: str):
-    expire = datetime.utcnow() + timedelta(hours=1)  # Token válido por 1 hora
+    expire = datetime.now(timezone.utc) + timedelta(hours=1)  # Token válido por 1 hora
     to_encode = {"sub": email, "exp": expire}
     token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return token
@@ -226,13 +224,13 @@ async def get_current_user(user_token: Annotated[str, Depends(oauth2_scheme)], d
     )
     try:
         payload = jwt.decode(user_token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
+        user_id: int = payload.get("sub")
+        if user_id is None:
             raise credentials_exception
-        token_data = token.TokenData(username=username)
+        token_data = token.TokenData(user_id=user_id)
     except InvalidTokenError:
         raise credentials_exception
-    user = get_user(db, username=token_data.username)
+    user = db.query(models.User).filter(models.User.id == token_data.user_id).first()
     if user is None:
         raise credentials_exception
     return user
@@ -257,7 +255,7 @@ async def login_for_access_token(form_data: Annotated[OAuth2PasswordRequestForm,
                             detail={"message": "Usuario no verificado", "email": user.email},
                             headers={"WWW-Authenticate": "Bearer"})
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(data={"sub": user.username}, expires_delta=access_token_expires)
+    access_token = create_access_token(data={"sub": user.id}, expires_delta=access_token_expires)
     full_name = user.full_name if user.full_name else user.username
     profile_image_url = f"/user/{user.id}/profile_image"
     return {"access_token": access_token, "token_type": "bearer", "full_name": full_name, "profile_image_url": profile_image_url, "user_id": user.id}
@@ -298,5 +296,24 @@ async def save_overrall_score(current_user: Annotated[user_schema.User, Depends(
 @app.get("/overall-scores", response_model=list[user_schema.OverallScore])
 async def get_overall_score_table(db: Annotated[Session, Depends(get_db)]):
     all_scores = scores_repo.get_overall_score_table(db)
-    print(all_scores, "all_scores")
     return all_scores
+
+
+@app.put("/user/profile", response_model=user_schema.UserRegisterResponse)
+async def update_user_profile(username: Annotated[str, Form()], full_name: Annotated[Optional[str], Form()], profile_image: Annotated[Optional[UploadFile], File()], country: Annotated[str, Form()], current_user: Annotated[user_schema.User, Depends(get_current_active_user)], delete_current_profile_image: Annotated[bool, Form()] = False, db: Session = Depends(get_db)):
+    profile_image_bytes = await profile_image.read() if profile_image else None
+    user_profile_update = user_schema.UserProfileUpdate(
+        username=username,
+        full_name=full_name,
+        profile_image=profile_image_bytes,
+        country=country
+    )
+    updated_user = register_login.update_user_profile(db, current_user.id, user_profile_update, delete_current_profile_image)
+    return updated_user
+
+@app.get("/user-profile/{user_id}", response_model=user_schema.UserEditProfileCurrentData)
+async def get_user_profile(user_id: int, current_user: Annotated[user_schema.User, Depends(get_current_active_user)], db: Session = Depends(get_db)):
+    user_profile = register_login.get_user_profile(db, user_id)
+    if not user_profile:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user_profile
