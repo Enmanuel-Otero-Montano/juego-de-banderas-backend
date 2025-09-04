@@ -5,8 +5,8 @@ from fastapi import FastAPI, HTTPException, Depends, status, Body, Form, UploadF
 from fastapi.security import HTTPBasic, OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from fastapi.responses import RedirectResponse, Response
 from sqlalchemy.orm import Session
+from config import settings
 from passlib.context import CryptContext
-from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
 
 import smtplib
@@ -29,28 +29,28 @@ from schemas.user_schema import UserRegisterResponse
 
 database.Base.metadata.create_all(bind=database.engine)
 
-load_dotenv()
 
 app = FastAPI()
 
 security = HTTPBasic()
 # Variables de entorno
-SECRET_KEY = os.getenv('SECRET_KEY')
-ACCESS_TOKEN_EXPIRE_MINUTES = float(os.getenv('ACCESS_TOKEN_EXPIRE_MINUTES', 2880))
-ALGORITHM = os.getenv('ALGORITHM')
-SMTP_SERVER = os.getenv('SMTP_SERVER')
-SMTP_PORT = os.getenv('SMTP_PORT')
-SENDER_EMAIL = os.getenv('SENDER_EMAIL')
-SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
-VERIFICATION_LINK = os.getenv('VERIFICATION_LINK')
-BASE_URL = os.getenv('BASE_URL')
+SECRET_KEY = settings.SECRET_KEY
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
+ALGORITHM = settings.ALGORITHM
+SMTP_SERVER = settings.SMTP_SERVER
+SMTP_PORT = settings.SMTP_PORT
+SENDER_EMAIL = settings.SENDER_EMAIL
+SENDER_PASSWORD = settings.SENDER_PASSWORD
+VERIFICATION_LINK = settings.VERIFICATION_LINK
+BASE_URL = settings.BASE_URL
+
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[BASE_URL],
+    allow_origins=[BASE_URL],  # si luego necesitas múltiples orígenes, pasa una lista
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -176,7 +176,9 @@ def resend_verification_email(email: Annotated[str, Body()], db: Session = Depen
 
     # Generar un nuevo token y reenviar el correo
     verification_token = create_email_verification_token(user.email)
-    send_verification_email(user.email, verification_token)
+    name = user.full_name if user.full_name else user.username
+    send_verification_email(user.email, verification_token, name)
+
 
     return {"msg": "Verification email resent successfully"}
 
@@ -317,3 +319,7 @@ async def get_user_profile(user_id: int, current_user: Annotated[user_schema.Use
     if not user_profile:
         raise HTTPException(status_code=401, detail="User not found")
     return user_profile
+
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse("/docs")

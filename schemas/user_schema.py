@@ -1,6 +1,6 @@
 from datetime import date
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, ConfigDict
 from typing import Optional
 
 
@@ -21,8 +21,7 @@ class User(UserBase):
     is_active: bool
     profile_image: Optional[bytes] = None
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
 
 class UserProfileUpdate(BaseModel):
     username: Optional[str] = None
@@ -47,8 +46,7 @@ class OverallScore(BaseModel):
     date_last_score: Optional[date] = None
     user: Optional[User] = None
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
 
 class ScoreRequest(BaseModel):
     score: int
