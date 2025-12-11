@@ -14,8 +14,9 @@ class User(database.Base):
     is_active = Column(Boolean, default=True)
     is_verified = Column(Boolean, default=False)
     profile_image = Column(LargeBinary, nullable=True)
-    overall_score = relationship("OverallScoreTable", back_populates='user')
+    overall_score = relationship("OverallScoreTable", back_populates='user', cascade="all, delete")
     country = Column(String, nullable=True)
+    
 
 class OverallScoreTable(database.Base):
     __tablename__ = "overall_score_table"
@@ -25,5 +26,5 @@ class OverallScoreTable(database.Base):
     last_score = Column(Integer)
     date_max_score = Column(Date)
     date_last_score = Column(Date)
-    user_id = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True)
     user = relationship("User", back_populates='overall_score')

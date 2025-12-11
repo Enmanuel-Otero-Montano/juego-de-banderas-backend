@@ -1,13 +1,19 @@
 from typing import Annotated, Optional
 from datetime import timedelta, datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Depends, status, Body, Form, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, status, Body, Form, UploadFile, File, Query, Request, Cookie
+
 from fastapi.security import HTTPBasic, OAuth2PasswordRequestForm, OAuth2PasswordBearer
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import RedirectResponse, Response, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette import status as starlette_status
+
 from sqlalchemy.orm import Session
 from config import settings
 from passlib.context import CryptContext
-from fastapi.middleware.cors import CORSMiddleware
 
 import smtplib
 from email.mime.text import MIMEText
@@ -17,20 +23,87 @@ from io import BytesIO
 
 from repository import register_login, scores_repo
 from schemas import user_schema, token
+from routers import scores, users
 from db import database, models
+
 import jwt
 import os
 
 from jwt.exceptions import InvalidTokenError
+from jwt import ExpiredSignatureError, InvalidSignatureError, DecodeError
 
-from schemas.user_schema import UserRegisterResponse
-
-# from schemas.overall_score_schema import ScoreRequest
+from schemas.user_schema import UserRegisterResponse, OverallScorePublic
 
 database.Base.metadata.create_all(bind=database.engine)
 
-
 app = FastAPI()
+
+security = HTTPBasic()
+
+# === CORS estricto según entorno ===
+# En dev añadimos orígenes locales comunes
+_local_dev = [
+    "http://127.0.0.1:5500", "http://localhost:5500",
+    "http://localhost:5173", "http://localhost:3000"
+]
+allow_origins = (
+    settings.ALLOWED_ORIGINS
+    if settings.ENV == "production"
+    else list({*settings.ALLOWED_ORIGINS, *_local_dev})
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allow_origins,
+    allow_credentials=False,  # True solo si vas a usar cookies/sesiones cross-site
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["Content-Length", "Content-Type"],
+    max_age=600,
+)
+
+app.include_router(scores.router)
+app.include_router(users.user_router)
+
+# === Healthcheck simple ===
+@app.get("/health", tags=["meta"])
+def health():
+    return {"status": "ok"}
+
+# === Handlers de error coherentes ===
+@app.exception_handler(StarletteHTTPException)
+async def http_exc_handler(request: Request, exc: StarletteHTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": exc.status_code,
+            "message": exc.detail or "HTTP error",
+            "path": str(request.url.path),
+        },
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exc_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=starlette_status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "error": 422,
+            "message": "Parámetros inválidos",
+            "details": exc.errors(),
+            "path": str(request.url.path),
+        },
+    )
+
+@app.exception_handler(Exception)
+async def unhandled_exc_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=starlette_status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "error": 500,
+            "message": "Ocurrió un error inesperado",
+            "path": str(request.url.path),
+        },
+    )
 
 security = HTTPBasic()
 # Variables de entorno
@@ -45,16 +118,8 @@ VERIFICATION_LINK = settings.VERIFICATION_LINK
 BASE_URL = settings.BASE_URL
 
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[BASE_URL],  # si luego necesitas múltiples orígenes, pasa una lista
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 def get_db():
@@ -67,7 +132,8 @@ def get_db():
 
 @app.post("/register", response_model=UserRegisterResponse)
 async def register_user(username: Annotated[str, Form()], full_name: Annotated[str, Form()], email: Annotated[str, Form()], password: Annotated[str, Form()], profile_image: Annotated[UploadFile, File()], db: Session = Depends(get_db)):
-    # TODO: Tengo que agregar una validación para el nombre de usuario
+    if register_login.check_username_exist(db, username):  # <-- NUEVO
+        raise HTTPException(status_code=400, detail="Username already taken")
     db_user = register_login.check_user_exist(db, email)
     image_content = await profile_image.read()
 
@@ -191,11 +257,12 @@ def get_password_hash(password):
     return pwd_context.hash(password)
 
 
-def get_user(db, username: str):
-    db_user = register_login.get_user_by_username(db, username)
-    if db_user:
-        return db_user
-    return None
+def get_user(db, username_or_email: str):
+    user = register_login.get_user_by_username(db, username_or_email)
+    if not user:
+        user = db.query(models.User).filter(models.User.email == username_or_email).first()
+    return user
+
 
 
 def authenticate_user(username: str, password: str, db: Session):
@@ -209,13 +276,12 @@ def authenticate_user(username: str, password: str, db: Session):
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
     to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
-    else:
-        expire = datetime.now(timezone.utc) + timedelta(minutes=15)
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=15))
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+    if "sub" in to_encode:
+        to_encode["sub"] = str(to_encode["sub"])
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
 
 
 async def get_current_user(user_token: Annotated[str, Depends(oauth2_scheme)], db: Session = Depends(get_db)):
@@ -226,14 +292,20 @@ async def get_current_user(user_token: Annotated[str, Depends(oauth2_scheme)], d
     )
     try:
         payload = jwt.decode(user_token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: int = payload.get("sub")
-        if user_id is None:
+        sub = payload.get("sub")
+        if sub is None:
             raise credentials_exception
-        token_data = token.TokenData(user_id=user_id)
-    except InvalidTokenError:
+        try:
+            user_id = int(sub)  # <- castear
+        except (TypeError, ValueError):
+            raise credentials_exception
+    except ExpiredSignatureError:
         raise credentials_exception
-    user = db.query(models.User).filter(models.User.id == token_data.user_id).first()
-    if user is None:
+    except (InvalidSignatureError, DecodeError, InvalidTokenError):
+        raise credentials_exception
+
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
         raise credentials_exception
     return user
 
@@ -262,6 +334,54 @@ async def login_for_access_token(form_data: Annotated[OAuth2PasswordRequestForm,
     profile_image_url = f"/user/{user.id}/profile_image"
     return {"access_token": access_token, "token_type": "bearer", "full_name": full_name, "profile_image_url": profile_image_url, "user_id": user.id}
 
+#@app.post("/refresh")
+# def refresh(response: Response, refresh_token: Optional[str] = Cookie(None)):
+#     payload = jwt.decode(refresh_token, SECRET_KEY, algorithms=[ALGORITHM])
+#     if payload.get("type") != "refresh": raise HTTPException(401)
+#     jti = payload["jti"]
+#     rec = db.get_refresh(jti)
+#     if not rec or rec.revoked: 
+#         # Reutilización detectada → revocar familia
+#         revoke_family(jti)
+#         raise HTTPException(401, "refresh reuse")
+#     # Rotación
+#     rec.revoked = True
+#     new_jti = uuid4().hex
+#     new_rt = create_refresh(rec.user_id, new_jti)
+#     rec.replaced_by = new_jti
+#     db.save_refresh(new_jti, rec.user_id, ua=..., ip=...)
+#     new_at = create_access(rec.user_id)
+#     response.set_cookie("refresh_token", new_rt, httponly=True, secure=True, samesite="Lax", path="/refresh")
+#     return {"access_token": new_at, "token_type": "bearer"}
+
+
+@app.post("/token", response_model=token.Token, tags=["auth"])
+async def issue_token(
+    form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+    db: Session = Depends(get_db)
+):
+    user = authenticate_user(form_data.username, form_data.password, db)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Usuario o contraseña incorrectos",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"message": "Usuario no verificado", "email": user.email},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.id},
+        expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
 @app.get("/user/{user_id}/profile_image")
 async def get_profile_image(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
@@ -283,22 +403,36 @@ async def get_profile_image(user_id: int, db: Session = Depends(get_db)):
     return Response(content=user.profile_image, media_type=media_type)
 
 
-@app.get("/users/me", response_model=user_schema.User)
-async def read_users_me(current_user: Annotated[user_schema.User, Depends(get_current_active_user)], ):
-    return current_user
+@app.get("/users/me", response_model=user_schema.UserMeResponse)
+async def read_users_me(current_user: Annotated[user_schema.User, Depends(get_current_active_user)]):
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "username": current_user.username,
+        "full_name": current_user.full_name,
+        "is_active": current_user.is_active,
+        "country": current_user.country,
+        "profile_image_url": f"/user/{current_user.id}/profile_image",
+    }
 
 
-@app.post("/save-overrall-score")
-async def save_overrall_score(current_user: Annotated[user_schema.User, Depends(get_current_active_user)],
-                              score_to_save: user_schema.ScoreRequest, db: Annotated[Session, Depends(get_db)]):
+@app.post("/save-overall-score")
+async def save_overall_score(
+    current_user: Annotated[user_schema.User, Depends(get_current_active_user)],
+    score_to_save: user_schema.ScoreRequest,
+    db: Annotated[Session, Depends(get_db)]
+):
     score = scores_repo.save_score(db, score_to_save.score, current_user)
     return score
 
 
-@app.get("/overall-scores", response_model=list[user_schema.OverallScore])
-async def get_overall_score_table(db: Annotated[Session, Depends(get_db)]):
-    all_scores = scores_repo.get_overall_score_table(db)
-    return all_scores
+@app.get("/overall-scores", response_model=list[OverallScorePublic])
+def overall_scores_public(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    return scores_repo.get_public_ranking(db, limit, offset)
 
 
 @app.put("/user/profile", response_model=user_schema.UserRegisterResponse)

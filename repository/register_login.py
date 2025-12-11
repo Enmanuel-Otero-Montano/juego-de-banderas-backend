@@ -7,6 +7,8 @@ from schemas import user_schema
 def check_user_exist(db: Session, user_email: str):
     return db.query(models.User).filter(models.User.email == user_email).first()
 
+def check_username_exist(db, username: str):
+    return db.query(models.User).filter(models.User.username == username).first()
 
 def get_user_by_username(db: Session, username: str):
     return db.query(models.User).filter(models.User.username == username).first()
