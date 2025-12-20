@@ -1,16 +1,10 @@
-from logging.config import fileConfig
-import os
-
-from sqlalchemy import engine_from_config, pool
-from alembic import context
+from config import settings
 
 # Alembic Config
 config = context.config
 
 # Permitir override de la URL vía env var (p.ej. CI/Docker)
-env_url = os.getenv("DATABASE_URL")
-if env_url:
-    config.set_main_option("sqlalchemy.url", env_url)
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL.get_secret_value())
 
 # Logging desde alembic.ini
 if config.config_file_name is not None:

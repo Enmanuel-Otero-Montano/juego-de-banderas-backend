@@ -13,7 +13,7 @@ from config import settings
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
 
-SECRET_KEY = settings.SECRET_KEY
+SECRET_KEY = settings.SECRET_KEY.get_secret_value()
 ALGORITHM = settings.ALGORITHM
 
 

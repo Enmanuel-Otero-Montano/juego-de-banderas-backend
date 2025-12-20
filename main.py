@@ -108,13 +108,13 @@ async def unhandled_exc_handler(request: Request, exc: Exception):
 
 security = HTTPBasic()
 # Variables de entorno
-SECRET_KEY = settings.SECRET_KEY
+SECRET_KEY = settings.SECRET_KEY.get_secret_value()
 ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
 ALGORITHM = settings.ALGORITHM
 SMTP_SERVER = settings.SMTP_SERVER
 SMTP_PORT = settings.SMTP_PORT
 SENDER_EMAIL = settings.SENDER_EMAIL
-SENDER_PASSWORD = settings.SENDER_PASSWORD
+SENDER_PASSWORD = settings.SENDER_PASSWORD.get_secret_value() if settings.SENDER_PASSWORD else None
 VERIFICATION_LINK = settings.VERIFICATION_LINK
 BASE_URL = settings.BASE_URL
 

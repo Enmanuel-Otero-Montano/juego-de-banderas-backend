@@ -2,7 +2,7 @@
 from functools import lru_cache
 from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import field_validator, model_validator
+from pydantic import field_validator, model_validator, SecretStr
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -12,11 +12,11 @@ class Settings(BaseSettings):
     )
 
     # DoD obligatorios
-    SECRET_KEY: str
-    DATABASE_URL: str
+    SECRET_KEY: SecretStr
+    DATABASE_URL: SecretStr
 
     # Entorno y CORS
-    ENV: Literal["development", "production", "test"] = "development"
+    ENV: Literal["development", "production", "test"]
     ALLOWED_ORIGINS: list[str] = []
 
     # Otros (con defaults / cast autom.)
@@ -26,17 +26,19 @@ class Settings(BaseSettings):
     SMTP_SERVER: str | None = None
     SMTP_PORT: int | None = None
     SENDER_EMAIL: str | None = None
-    SENDER_PASSWORD: str | None = None
+    SENDER_PASSWORD: SecretStr | None = None
 
     VERIFICATION_LINK: str | None = None
     BASE_URL: str = "http://127.0.0.1:5500"
 
     @field_validator("DATABASE_URL")
     @classmethod
-    def normalize_db_url(cls, v: str) -> str:
-        if v.startswith("postgres://"):
-            v = v.replace("postgres://", "postgresql+psycopg2://", 1)
-        return v
+    def normalize_db_url(cls, v):
+        is_secret = isinstance(v, SecretStr)
+        raw = v.get_secret_value() if is_secret else v
+        if raw.startswith("postgres://"):
+            raw = raw.replace("postgres://", "postgresql+psycopg2://", 1)
+        return SecretStr(raw) if is_secret else raw
 
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod
