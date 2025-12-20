@@ -11,6 +11,10 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette import status as starlette_status
 
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+
 from sqlalchemy.orm import Session
 from config import settings
 from passlib.context import CryptContext
@@ -37,6 +41,23 @@ from schemas.user_schema import UserRegisterResponse, OverallScorePublic
 database.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI()
+
+# Rate limiting configuration
+limiter = Limiter(key_func=get_remote_address, default_limits=["200/hour"])
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+@app.exception_handler(RateLimitExceeded)
+async def custom_rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": 429,
+            "message": "Demasiadas solicitudes. Por favor intenta más tarde.",
+            "retry_after": exc.detail,  # Tiempo en segundos para reintentar
+            "path": str(request.url.path),
+        },
+    )
 
 security = HTTPBasic()
 
@@ -68,6 +89,7 @@ app.include_router(daily_challenge.router)
 
 # === Healthcheck simple ===
 @app.get("/health", tags=["meta"])
+@limiter.exempt  # Excluir healthcheck del rate limiting
 def health():
     return {"status": "ok"}
 
@@ -132,7 +154,16 @@ def get_db():
 
 
 @app.post("/register", response_model=UserRegisterResponse)
-async def register_user(username: Annotated[str, Form()], full_name: Annotated[str, Form()], email: Annotated[str, Form()], password: Annotated[str, Form()], profile_image: Annotated[UploadFile, File()], db: Session = Depends(get_db)):
+@limiter.limit("5/hour")  # Máximo 5 registros por hora por IP
+async def register_user(
+    request: Request,
+    username: Annotated[str, Form()],
+    full_name: Annotated[str, Form()],
+    email: Annotated[str, Form()],
+    password: Annotated[str, Form()],
+    profile_image: Annotated[UploadFile, File()],
+    db: Session = Depends(get_db)
+):
     if register_login.check_username_exist(db, username):  # <-- NUEVO
         raise HTTPException(status_code=400, detail="Username already taken")
     db_user = register_login.check_user_exist(db, email)
@@ -234,7 +265,12 @@ def verify_email(token: str, db: Session = Depends(get_db)):
 
 
 @app.post("/resend-verification-email")
-def resend_verification_email(email: Annotated[str, Body()], db: Session = Depends(get_db)):
+@limiter.limit("3/hour")  # Máximo 3 reenvíos por hora por IP
+def resend_verification_email(
+    request: Request,
+    email: Annotated[str, Body()],
+    db: Session = Depends(get_db)
+):
     user = db.query(models.User).filter(models.User.email == email).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
@@ -318,8 +354,12 @@ async def get_current_active_user(current_user: Annotated[user_schema.User, Depe
 
 
 @app.post("/login")
-async def login_for_access_token(form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
-                                 db: Session = Depends(get_db)):
+@limiter.limit("10/minute")  # Máximo 10 intentos por minuto por IP
+async def login_for_access_token(
+    request: Request,
+    form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+    db: Session = Depends(get_db)
+):
     user = authenticate_user(form_data.username, form_data.password, db)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
@@ -357,7 +397,9 @@ async def login_for_access_token(form_data: Annotated[OAuth2PasswordRequestForm,
 
 
 @app.post("/token", response_model=token.Token, tags=["auth"])
+@limiter.limit("10/minute")  # Máximo 10 intentos por minuto
 async def issue_token(
+    request: Request,
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
     db: Session = Depends(get_db)
 ):
