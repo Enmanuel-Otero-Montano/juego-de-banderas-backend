@@ -98,4 +98,13 @@ def get_public_ranking(db, limit: int | None = None, offset: int | None = None):
     ]
 
 
+def get_user_best_score(db: Session, user_id: int):
+    return (
+        db.query(OverallScoreTable)
+        .filter(OverallScoreTable.user_id == user_id)
+        .first()
+    )
+
+
+
 

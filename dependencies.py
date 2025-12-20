@@ -11,6 +11,7 @@ from schemas import user_schema
 from config import settings
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
 
 SECRET_KEY = settings.SECRET_KEY
 ALGORITHM = settings.ALGORITHM
@@ -59,3 +60,28 @@ async def get_current_active_user(
     if not current_user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
     return current_user
+
+
+async def get_current_user_optional(
+    user_token: Annotated[str | None, Depends(oauth2_scheme_optional)], 
+    db: Session = Depends(get_db)
+):
+    if not user_token:
+        return None
+        
+    try:
+        payload = jwt.decode(user_token, SECRET_KEY, algorithms=[ALGORITHM])
+        sub = payload.get("sub")
+        if sub is None:
+            return None
+        try:
+            user_id = int(sub)
+        except (TypeError, ValueError):
+            return None
+    except (ExpiredSignatureError, InvalidSignatureError, DecodeError, InvalidTokenError):
+        return None
+
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        return None
+    return user

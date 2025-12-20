@@ -23,7 +23,7 @@ from io import BytesIO
 
 from repository import register_login, scores_repo
 from schemas import user_schema, token
-from routers import scores, users
+from routers import scores, users, daily_challenge
 from db import database, models
 
 import jwt
@@ -64,6 +64,7 @@ app.add_middleware(
 
 app.include_router(scores.router)
 app.include_router(users.user_router)
+app.include_router(daily_challenge.router)
 
 # === Healthcheck simple ===
 @app.get("/health", tags=["meta"])
@@ -413,7 +414,25 @@ async def read_users_me(current_user: Annotated[user_schema.User, Depends(get_cu
         "is_active": current_user.is_active,
         "country": current_user.country,
         "profile_image_url": f"/user/{current_user.id}/profile_image",
+        "onboarding_completed": current_user.onboarding_completed,
     }
+
+
+@app.put("/users/me/onboarding")
+async def update_onboarding(
+    onboarding_data: user_schema.OnboardingUpdate,
+    current_user: Annotated[user_schema.User, Depends(get_current_active_user)],
+    db: Session = Depends(get_db)
+):
+    try:
+        updated_user = register_login.update_onboarding_status(
+            db, 
+            current_user.id, 
+            onboarding_data.onboarding_completed
+        )
+        return {"message": "Onboarding status updated successfully", "onboarding_completed": updated_user.onboarding_completed}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.post("/save-overall-score")

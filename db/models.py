@@ -1,5 +1,6 @@
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, LargeBinary, Date
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, LargeBinary, Date, DateTime
 from sqlalchemy.orm import relationship
+from datetime import datetime
 
 from db import database
 
@@ -16,6 +17,7 @@ class User(database.Base):
     profile_image = Column(LargeBinary, nullable=True)
     overall_score = relationship("OverallScoreTable", back_populates='user', cascade="all, delete")
     country = Column(String, nullable=True)
+    onboarding_completed = Column(Boolean, default=False, nullable=False)
     
 
 class OverallScoreTable(database.Base):
@@ -28,3 +30,46 @@ class OverallScoreTable(database.Base):
     date_last_score = Column(Date)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True)
     user = relationship("User", back_populates='overall_score')
+
+
+class DailyChallenge(database.Base):
+    __tablename__ = "daily_challenges"
+
+    id = Column(Integer, primary_key=True, index=True)
+    date = Column(Date, unique=True, index=True, nullable=False)
+    country_name = Column(String, nullable=False)
+    country_code = Column(String, nullable=False)  # cca3
+    flag_image_bytes = Column(LargeBinary, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class DailyAttempt(database.Base):
+    __tablename__ = "daily_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    challenge_id = Column(Integer, ForeignKey("daily_challenges.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    anonymous_id = Column(String, nullable=True, index=True)
+    attempts_used = Column(Integer, default=0)
+    solved = Column(Boolean, default=False)
+    failed = Column(Boolean, default=False)
+    solved_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    challenge = relationship("DailyChallenge")
+    guesses = relationship("DailyGuess", back_populates="attempt", cascade="all, delete-orphan")
+
+
+class DailyGuess(database.Base):
+    __tablename__ = "daily_guesses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    attempt_id = Column(Integer, ForeignKey("daily_attempts.id"), nullable=False)
+    guess_text = Column(String, nullable=False)
+    is_correct = Column(Boolean, nullable=False)
+    attempt_number = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    attempt = relationship("DailyAttempt", back_populates="guesses")
+

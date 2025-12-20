@@ -66,6 +66,7 @@ class UserMeResponse(BaseModel):
     is_active: bool
     country: Optional[str] = None
     profile_image_url: str
+    onboarding_completed: bool = False
     model_config = ConfigDict(from_attributes=True)
 
 class OverallScorePublic(BaseModel):
@@ -73,3 +74,7 @@ class OverallScorePublic(BaseModel):
     max_score: int
     date_max_score: Optional[date] = None
     model_config = ConfigDict(from_attributes=True)
+
+class OnboardingUpdate(BaseModel):
+    onboarding_completed: bool
+

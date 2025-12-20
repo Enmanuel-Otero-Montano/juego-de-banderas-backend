@@ -41,3 +41,15 @@ def update_user_profile(db: Session, user_id: int, user_profile_update: user_sch
 def get_user_profile(db: Session, user_id: int):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     return user
+
+def update_onboarding_status(db: Session, user_id: int, completed: bool):
+    """Update the onboarding completion status for a user"""
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if db_user:
+        db_user.onboarding_completed = completed
+        db.commit()
+        db.refresh(db_user)
+        return db_user
+    else:
+        raise ValueError("Usuario no encontrado")
+

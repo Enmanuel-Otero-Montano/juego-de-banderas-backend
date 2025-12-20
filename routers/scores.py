@@ -18,6 +18,18 @@ async def save_score(
     result = scores_repo.save_score(db, score_data.score, current_user)
     return result
 
+@router.get("/me/best")
+async def get_my_best_score(
+    current_user: Annotated[user_schema.User, Depends(get_current_active_user)],
+    db: Session = Depends(get_db)
+):
+    """Obtiene la mejor puntuación histórica del usuario actual"""
+    record = scores_repo.get_user_best_score(db, current_user.id)
+    if not record:
+        return {"max_score": 0}
+    return {"max_score": record.max_score}
+
+
 @router.get("/")
 async def get_scores(
     scope: score.ScoreScope = Query(default=score.ScoreScope.global_scope),
