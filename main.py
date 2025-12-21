@@ -11,9 +11,10 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette import status as starlette_status
 
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from utils.limiter import limiter
 
 from sqlalchemy.orm import Session
 from config import settings
@@ -27,7 +28,7 @@ from io import BytesIO
 
 from repository import register_login, scores_repo
 from schemas import user_schema, token
-from routers import scores, users, daily_challenge
+from routers import scores, users, daily_challenge, health
 from db import database, models
 
 import jwt
@@ -36,14 +37,51 @@ import os
 from jwt.exceptions import InvalidTokenError
 from jwt import ExpiredSignatureError, InvalidSignatureError, DecodeError
 
+import logging
+from logging.handlers import RotatingFileHandler
+import sys
+
 from schemas.user_schema import UserRegisterResponse, OverallScorePublic
 
 database.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI()
 
+# Configurar logging
+def setup_logging():
+    # Crear directorio de logs si no existe
+    import os
+    os.makedirs("logs", exist_ok=True)
+    
+    # Configuración del logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO if settings.ENV == "production" else logging.DEBUG)
+    
+    # Formato
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Handler para archivo (rotación automática)
+    file_handler = RotatingFileHandler(
+        'logs/app.log',
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    
+    # Handler para consola
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+logger = setup_logging()
+
 # Rate limiting configuration
-limiter = Limiter(key_func=get_remote_address, default_limits=["200/hour"])
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -86,12 +124,7 @@ app.add_middleware(
 app.include_router(scores.router)
 app.include_router(users.user_router)
 app.include_router(daily_challenge.router)
-
-# === Healthcheck simple ===
-@app.get("/health", tags=["meta"])
-@limiter.exempt  # Excluir healthcheck del rate limiting
-def health():
-    return {"status": "ok"}
+app.include_router(health.router)
 
 # === Handlers de error coherentes ===
 @app.exception_handler(StarletteHTTPException)
@@ -119,6 +152,14 @@ async def validation_exc_handler(request: Request, exc: RequestValidationError):
 
 @app.exception_handler(Exception)
 async def unhandled_exc_handler(request: Request, exc: Exception):
+    logger.error(
+        f"Unhandled exception on {request.method} {request.url.path}",
+        exc_info=True,  # Incluye traceback completo
+        extra={
+            "client_ip": request.client.host if request.client else "unknown",
+            "user_agent": request.headers.get("user-agent", "unknown")
+        }
+    )
     return JSONResponse(
         status_code=starlette_status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={
@@ -164,6 +205,7 @@ async def register_user(
     profile_image: Annotated[UploadFile, File()],
     db: Session = Depends(get_db)
 ):
+    logger.info(f"Nuevo registro de usuario: {email}")
     if register_login.check_username_exist(db, username):  # <-- NUEVO
         raise HTTPException(status_code=400, detail="Username already taken")
     db_user = register_login.check_user_exist(db, email)
@@ -362,9 +404,12 @@ async def login_for_access_token(
 ):
     user = authenticate_user(form_data.username, form_data.password, db)
     if not user:
+        logger.warning(f"Intento de login fallido para: {form_data.username}")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                             detail={"message": "Usuario o contraseña incorrectos"},
                             headers={"WWW-Authenticate": "Bearer"}, )
+    
+    logger.info(f"Login exitoso: {user.username}")
     if user and not user.is_verified:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                             detail={"message": "Usuario no verificado", "email": user.email},
