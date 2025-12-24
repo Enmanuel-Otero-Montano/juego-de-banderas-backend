@@ -11,6 +11,9 @@ class ScoreScope(str, Enum):
 
 class ScoreRequest(BaseModel):
     score: int
+    game_duration_seconds: Optional[int] = None
+    game_mode: Optional[str] = None
+    game_region: Optional[str] = None
 
 class ScoreResponse(BaseModel):
     id: int

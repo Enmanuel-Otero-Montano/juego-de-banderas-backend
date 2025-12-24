@@ -11,10 +11,18 @@ router = APIRouter(prefix="/scores", tags=["scores"])
 @router.post("/")
 async def save_score(
     current_user: Annotated[user_schema.User, Depends(get_current_active_user)],
-    score_data: user_schema.ScoreRequest,
+    score_data: score.ScoreRequest,
     db: Annotated[Session, Depends(get_db)]
 ):
     """Guarda un nuevo score del usuario"""
+    # 1. Fetch user history for validation
+    user_history = scores_repo.get_user_best_score(db, current_user.id)
+    
+    # 2. Validate score
+    from utils.score_validator import validate_score_legitimacy
+    validate_score_legitimacy(score_data.score, score_data, user_history)
+    
+    # 3. Save score if valid
     result = scores_repo.save_score(db, score_data.score, current_user)
     return result
 
