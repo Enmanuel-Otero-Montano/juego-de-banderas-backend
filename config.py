@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     VERIFICATION_LINK: str | None = None
     BASE_URL: str = "http://127.0.0.1:5500"
 
+    # Daily Challenge
+    DAILY_MAX_ATTEMPTS: int = 4
+
     @field_validator("DATABASE_URL")
     @classmethod
     def normalize_db_url(cls, v):

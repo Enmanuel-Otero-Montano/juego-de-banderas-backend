@@ -9,6 +9,11 @@ class GuessAnswer(BaseModel):
     code: str
 
 
+class Hint(BaseModel):
+    title: str
+    value: str
+
+
 class DailyChallengeStatus(BaseModel):
     date: date
     max_attempts: int
@@ -16,6 +21,10 @@ class DailyChallengeStatus(BaseModel):
     status: str  # "in_progress", "solved", "failed"
     reveal_level: int
     can_play: bool
+    hints_unlocked: list[Hint] = []
+    hints_total: int = 0
+    share_text: Optional[str] = None
+    share_url: Optional[str] = None
     correct_answer: Optional[GuessAnswer] = None
 
 
@@ -29,6 +38,8 @@ class GuessResponse(BaseModel):
     max_attempts: int
     reveal_level: int
     attempts_left: int
-    message: Optional[str] = None
-    answer: Optional[GuessAnswer] = None
+    is_correct: bool
+    hints_unlocked: list[Hint] = []
     share_text: Optional[str] = None
+    share_url: Optional[str] = None
+    correct_answer: Optional[GuessAnswer] = None

@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, LargeBinary, Date, DateTime
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, LargeBinary, Date, DateTime, Float
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
@@ -40,6 +40,16 @@ class DailyChallenge(database.Base):
     country_name = Column(String, nullable=False)
     country_code = Column(String, nullable=False)  # cca3
     flag_image_bytes = Column(LargeBinary, nullable=False)
+    
+    # Educational & Hint Data
+    region = Column(String, nullable=True)
+    subregion = Column(String, nullable=True)
+    capital = Column(String, nullable=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    population = Column(Integer, nullable=True)
+    languages = Column(String, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

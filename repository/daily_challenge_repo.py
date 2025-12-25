@@ -10,7 +10,9 @@ from db import models
 from schemas import daily_challenge_schema
 
 
-REST_COUNTRIES_URL = "https://restcountries.com/v3.1/all?fields=name,flags,cca2,cca3"
+from config import settings
+
+REST_COUNTRIES_URL = "https://restcountries.com/v3.1/all?fields=name,flags,cca2,cca3,region,subregion,capital,latlng,population,languages"
 
 
 def get_deterministic_country(date_obj: date):
@@ -72,11 +74,29 @@ def ensure_today_challenge(db: Session, today: date) -> models.DailyChallenge:
         # In production, we might want a fallback or retry, but for now we fail hard as requested
         raise ValueError(f"Could not download flag from {flag_url}")
 
+    # Prepare languages string
+    langs = country_data.get("languages", {})
+    languages_str = ",".join(langs.values()) if langs else None
+    
+    capital_list = country_data.get("capital", [])
+    capital_val = capital_list[0] if capital_list else None
+    
+    latlng = country_data.get("latlng", [])
+    lat_val = latlng[0] if len(latlng) > 0 else None
+    lng_val = latlng[1] if len(latlng) > 1 else None
+
     new_challenge = models.DailyChallenge(
         date=today,
         country_name=country_data["name"]["common"],
         country_code=country_data["cca3"],
         flag_image_bytes=flag_bytes,
+        region=country_data.get("region"),
+        subregion=country_data.get("subregion"),
+        capital=capital_val,
+        latitude=lat_val,
+        longitude=lng_val,
+        population=country_data.get("population"),
+        languages=languages_str,
         created_at=datetime.utcnow()
     )
     db.add(new_challenge)
@@ -123,12 +143,69 @@ def get_or_create_attempt(
     return new_attempt
 
 
+def build_hints(challenge: models.DailyChallenge, attempts_used: int, max_attempts: int):
+    """
+    Returns a list of unlocked hints based on attempts used and max attempts.
+    """
+    hints_unlocked = []
+    
+    # attempts_used >= 0: Pista 1 "Continente/Región"
+    if attempts_used >= 0:
+        val = challenge.region or "Desconocido"
+        hints_unlocked.append({"title": "Continente/Región", "value": val})
+        
+    # attempts_used >= 1: Pista 2 "Hemisferio"
+    if attempts_used >= 1:
+        lat = challenge.latitude
+        lng = challenge.longitude
+        if lat is not None and lng is not None:
+            ns = "Norte" if lat >= 0 else "Sur"
+            ew = "Este" if lng >= 0 else "Oeste"
+            val = f"{ns} y {ew}"
+        else:
+            val = "Desconocido"
+        hints_unlocked.append({"title": "Hemisferio", "value": val})
+            
+    # attempts_used >= 2: Pista 3 "Subregión" (solo si max_attempts >= 4)
+    if attempts_used >= 2 and max_attempts >= 4:
+        val = challenge.subregion or "Desconocida"
+        hints_unlocked.append({"title": "Subregión", "value": val})
+             
+    return hints_unlocked
+
+
+def build_share_payload(attempt: models.DailyAttempt, challenge: models.DailyChallenge, max_attempts: int, base_url: str):
+    """
+    Returns (share_text, share_url) if finished, else (None, None).
+    """
+    if not (attempt.solved or attempt.failed):
+        return None, None
+
+    score_display = str(attempt.attempts_used) if attempt.solved else "X"
+    date_str = challenge.date.isoformat()
+    
+    emojis = []
+    if attempt.guesses:
+        sorted_guesses = sorted(attempt.guesses, key=lambda g: g.attempt_number)
+        for g in sorted_guesses:
+            if g.is_correct:
+                emojis.append("🟩")
+            else:
+                emojis.append("🟥")
+    
+    emoji_line = "".join(emojis)
+    share_url = f"{base_url}/daily-challenge.html?date={date_str}&utm_source=share"
+    share_text = f"Bandera Diaria {date_str}\n{score_display}/{max_attempts}\n{emoji_line}"
+    
+    return share_text, share_url
+
+
 def submit_guess(db: Session, attempt: models.DailyAttempt, guess_text: str) -> daily_challenge_schema.GuessResponse:
     """
     Processes a guess. detailed logic in implementation plan.
     """
     challenge = attempt.challenge
-    max_attempts = 6
+    max_attempts = settings.DAILY_MAX_ATTEMPTS
     
     normalized_guess = guess_text.strip().lower()
     target_name = challenge.country_name.lower()
@@ -190,55 +267,27 @@ def _build_response(
     elif attempt.failed:
         status_str = "failed"
         
-    # Reveal level logic: 0 to 6. simpler mapping
-    reveal_level = attempt.attempts_used 
+    hints_unlocked = build_hints(challenge, attempt.attempts_used, max_attempts)
+    reveal_level = max_attempts if (attempt.solved or attempt.failed) else min(attempt.attempts_used, max_attempts)
     
-    # Construct Answer and Share Text if finished
-    answer = None
-    share_text = None
+    share_text, share_url = build_share_payload(attempt, challenge, max_attempts, settings.BASE_URL)
     
+    correct_answer = None
     if attempt.solved or attempt.failed:
-        answer = daily_challenge_schema.GuessAnswer(
+        correct_answer = daily_challenge_schema.GuessAnswer(
             name=challenge.country_name,
             code=challenge.country_code
         )
-        
-        # Share text generation
-        # "Daily Flag YYYY-MM-DD - X/6"
-        score_display = str(attempt.attempts_used) if attempt.solved else "X"
-        date_str = challenge.date.isoformat()
-        
-        emoji_line = ""
-        # We need to recreate the history of correctness.
-        # Since we might not have the list of daily_guesses passed here, 
-        # we can infer valid logic or fetch guesses if needed.
-        # But for simpler implementation, let's just use squares.
-        # Ideally we fetch the guesses to generate the exact emoji sequence.
-        # But since we just saved the guess, or it's an existing attempt, 
-        # let's assume valid guesses are stored.
-        # For this turn, I will just generate a simple summary string if I can't access guesses easily.
-        # Actually `attempt.guesses` should be available via relationship if eager loaded or lazily fetched.
-        
-        emojis = []
-        # Sort guesses by number
-        sorted_guesses = sorted(attempt.guesses, key=lambda g: g.attempt_number)
-        for g in sorted_guesses:
-            if g.is_correct:
-                emojis.append("🟩")
-            else:
-                emojis.append("🟥")
-        
-        emoji_line = "".join(emojis)
-
-        share_text = f"Daily Flag {date_str} - {score_display}/{max_attempts}\n{emoji_line}"
 
     return daily_challenge_schema.GuessResponse(
         status=status_str,
         attempts_used=attempt.attempts_used,
         max_attempts=max_attempts,
         reveal_level=reveal_level,
-        attempts_left=max_attempts - attempt.attempts_used,
-        message=message,
-        answer=answer,
-        share_text=share_text
+        attempts_left=max(0, max_attempts - attempt.attempts_used),
+        is_correct=is_just_solved,
+        hints_unlocked=hints_unlocked,
+        share_text=share_text,
+        share_url=share_url,
+        correct_answer=correct_answer
     )

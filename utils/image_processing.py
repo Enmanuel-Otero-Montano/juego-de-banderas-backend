@@ -1,64 +1,87 @@
+import random
+import hashlib
+from datetime import date
 from io import BytesIO
-from PIL import Image
+from PIL import Image, ImageFilter, ImageDraw
+
+from config import settings
 
 
-def pixelate_image(image_bytes: bytes, reveal_level: int) -> bytes:
+def pixelate_image(image_bytes: bytes, reveal_level: int, *, seed_date: date | None = None, max_level: int | None = None) -> bytes:
     """
-    Apply pixelation/mosaic effect to an image based on reveal level.
-    
-    Args:
-        image_bytes: Original image as bytes (PNG, JPG, etc.)
-        reveal_level: Integer 0-6 representing the reveal progression
-                      0-1: Very heavy pixelation (16x16 blocks)
-                      2: Medium-heavy pixelation (12x12 blocks)
-                      3: Medium pixelation (8x8 blocks)
-                      4: Light pixelation (4x4 blocks)
-                      5: Very light pixelation (2x2 blocks)
-                      6+: Original image (no pixelation)
-    
-    Returns:
-        Processed image as PNG bytes
+    Devuelve la bandera procesada según reveal_level.
+    - Si reveal_level >= max_level => devuelve la imagen original (sin grilla).
+    - Determinístico por seed_date + reveal_level.
     """
-    # Load the image
+    max_level = max_level or settings.DAILY_MAX_ATTEMPTS
+    seed_date = seed_date or date.today()
+
+    # Load image
     img = Image.open(BytesIO(image_bytes))
-    
-    # Convert to RGB if necessary (handles RGBA, P, etc.)
-    if img.mode != 'RGB':
-        img = img.convert('RGB')
-    
-    # Determine block size based on reveal level
-    if reveal_level <= 1:
-        block_size = 16
-    elif reveal_level == 2:
-        block_size = 12
-    elif reveal_level == 3:
-        block_size = 8
-    elif reveal_level == 4:
-        block_size = 4
-    elif reveal_level == 5:
-        block_size = 2
-    else:
-        # reveal_level >= 6: return original
-        output = BytesIO()
-        img.save(output, format='PNG')
-        return output.getvalue()
-    
-    # Apply pixelation by downscaling and upscaling
-    original_size = img.size
-    
-    # Calculate downscaled size
-    small_size = (
-        max(1, original_size[0] // block_size),
-        max(1, original_size[1] // block_size)
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+
+    # ✅ Si terminó el juego (o reveal_level alto), devolvemos la original
+    if reveal_level >= max_level:
+        out = BytesIO()
+        img.save(out, format="PNG")
+        return out.getvalue()
+
+    # Deterministic Seed
+    seed_str = f"{seed_date.isoformat()}:{reveal_level}"
+    seed_hash = int(hashlib.sha256(seed_str.encode()).hexdigest(), 16)
+    rng = random.Random(seed_hash)
+
+    # 1) Pixelation (Downscale -> Upscale)
+    widths = [20, 40, 70, 110, 160, 220]  # sirve bien aunque max_attempts sea 4 (usarás levels 0..3)
+    target_width = widths[min(reveal_level, len(widths) - 1)]
+
+    w, h = img.size
+    aspect = h / w
+    target_h = max(1, int(target_width * aspect))
+
+    img_small = img.resize((target_width, target_h), Image.Resampling.BILINEAR)
+    img_pixelated = img_small.resize((w, h), Image.Resampling.NEAREST)
+
+    # 2) Blur
+    blur_radius = max(0.0, (5 - reveal_level) * 0.5)
+    if blur_radius > 0:
+        img_pixelated = img_pixelated.filter(ImageFilter.GaussianBlur(blur_radius))
+
+    # 3) Noise (tu versión, tal cual)
+    pixels = img_pixelated.load()
+    noise_intensity = max(0, 30 - (reveal_level * 5))
+
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = pixels[x, y]
+            nr = rng.randint(-noise_intensity, noise_intensity)
+            ng = rng.randint(-noise_intensity, noise_intensity)
+            nb = rng.randint(-noise_intensity, noise_intensity)
+            pixels[x, y] = (
+                min(255, max(0, r + nr)),
+                min(255, max(0, g + ng)),
+                min(255, max(0, b + nb)),
+                a
+            )
+
+    # 4) Rotation (fillcolor en RGBA)
+    angle = rng.uniform(-1.5, 1.5)
+    img_pixelated = img_pixelated.rotate(
+        angle,
+        resample=Image.Resampling.BILINEAR,
+        fillcolor=(200, 200, 200, 255),
     )
-    
-    # Resize down (averaging pixels into blocks)
-    img_small = img.resize(small_size, Image.Resampling.BILINEAR)
-    
-    # Resize back up (creating the mosaic effect)
-    img_pixelated = img_small.resize(original_size, Image.Resampling.NEAREST)
-    
-    # Convert to bytes
-    output = BytesIO()
-    img_pixelated.save(output, format='PNG')
-    return output.getvalue()
+
+    # 5) Grid overlay con alpha (ahora sí válido)
+    draw = ImageDraw.Draw(img_pixelated, "RGBA")
+    grid_size = rng.randint(20, 40)
+
+    for x in range(0, w, grid_size):
+        draw.line((x, 0, x, h), fill=(128, 128, 128, 50), width=1)
+    for y in range(0, h, grid_size):
+        draw.line((0, y, w, y), fill=(128, 128, 128, 50), width=1)
+
+    out = BytesIO()
+    img_pixelated.save(out, format="PNG")
+    return out.getvalue()
