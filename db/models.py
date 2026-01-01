@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, LargeBinary, Date, DateTime, Float
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, LargeBinary, Date, DateTime, Float, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
@@ -26,9 +26,16 @@ class OverallScoreTable(database.Base):
     id = Column(Integer, primary_key=True)
     max_score = Column(Integer)
     last_score = Column(Integer)
-    date_max_score = Column(Date)
+    date_max_score = Column(DateTime)
     date_last_score = Column(Date)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
+    region_key = Column(String, default="career", index=True, nullable=False)
+    country_code = Column(String, index=True, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint('user_id', 'region_key', name='uix_user_region'),
+    )
+
     user = relationship("User", back_populates='overall_score')
 
 

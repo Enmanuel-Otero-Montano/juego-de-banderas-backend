@@ -9,11 +9,19 @@ class ScoreScope(str, Enum):
     country = "country"
     region = "region"
 
+class RegionEnum(str, Enum):
+    career = "career"
+    america = "america"
+    europe = "europe"
+    asia = "asia"
+    africa = "africa"
+    oceania = "oceania"
+
 class ScoreRequest(BaseModel):
     score: int
     game_duration_seconds: Optional[int] = None
     game_mode: Optional[str] = None
-    game_region: Optional[str] = None
+    game_region: Optional[str] = None # Input from frontend (URL or key)
 
 class ScoreResponse(BaseModel):
     id: int
