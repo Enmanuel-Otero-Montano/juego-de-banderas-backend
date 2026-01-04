@@ -28,7 +28,7 @@ from io import BytesIO
 
 from repository import register_login, scores_repo
 from schemas import user_schema, token
-from routers import scores, users, daily_challenge, health
+from routers import scores, users, daily_challenge, health, career
 from db import database, models
 
 import jwt
@@ -125,6 +125,7 @@ app.include_router(scores.router)
 app.include_router(users.user_router)
 app.include_router(daily_challenge.router)
 app.include_router(health.router)
+app.include_router(career.router)  # Career mode endpoints
 
 # === Handlers de error coherentes ===
 @app.exception_handler(StarletteHTTPException)

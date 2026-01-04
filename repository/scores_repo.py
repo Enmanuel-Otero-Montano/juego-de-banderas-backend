@@ -82,7 +82,7 @@ def get_ranking_query(db: Session, region_key: str | None = None, country_code: 
         OverallScoreTable.date_max_score,
         OverallScoreTable.country_code,
         OverallScoreTable.region_key
-    ).join(User, User.id == OverallScoreTable.user_id)
+    ).select_from(OverallScoreTable).join(User, User.id == OverallScoreTable.user_id)
 
     if region_key:
         q = q.filter(OverallScoreTable.region_key == region_key)

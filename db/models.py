@@ -1,4 +1,5 @@
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, LargeBinary, Date, DateTime, Float, UniqueConstraint
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, LargeBinary, Date, DateTime, Float, UniqueConstraint, Index, JSON
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
@@ -18,6 +19,11 @@ class User(database.Base):
     overall_score = relationship("OverallScoreTable", back_populates='user', cascade="all, delete")
     country = Column(String, nullable=True)
     onboarding_completed = Column(Boolean, default=False, nullable=False)
+    
+    # Career mode relationships (modo carrera only - regiones does NOT persist here)
+    career_stats = relationship("CareerUserStats", back_populates="user", uselist=False, cascade="all, delete")
+    stage_bests = relationship("StageBest", back_populates="user", cascade="all, delete")
+    stage_runs = relationship("StageRun", back_populates="user", cascade="all, delete")
     
 
 class OverallScoreTable(database.Base):
@@ -90,3 +96,83 @@ class DailyGuess(database.Base):
 
     attempt = relationship("DailyAttempt", back_populates="guesses")
 
+
+# =============================================================================
+# CAREER MODE TABLES
+# Nota: Estas tablas son exclusivas para modo carrera.
+# Modo por regiones NO persiste puntaje ni estadísticas aquí.
+# overall_score_table (legacy) queda intacta para compatibilidad con modo regiones.
+# =============================================================================
+
+class CareerUserStats(database.Base):
+    """
+    Estadísticas agregadas de carrera por usuario (1 fila por user).
+    Facilita ORDER BY para ranking: stages_completed DESC, total_score DESC,
+    total_hints_used ASC, total_time_seconds ASC, last_activity_at ASC.
+    """
+    __tablename__ = "career_user_stats"
+
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    stages_completed = Column(Integer, default=0, nullable=False)
+    total_score = Column(Integer, default=0, nullable=False)
+    total_hints_used = Column(Integer, default=0, nullable=False)
+    total_time_seconds = Column(Integer, default=0, nullable=False)
+    last_activity_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index('ix_career_ranking', 
+              stages_completed.desc(), 
+              total_score.desc(), 
+              total_hints_used.asc(), 
+              total_time_seconds.asc(),
+              last_activity_at.asc()),
+    )
+
+    user = relationship("User", back_populates="career_stats")
+
+
+class StageBest(database.Base):
+    """
+    Mejor resultado por usuario y etapa (evitar farming).
+    Unique constraint en (user_id, stage_id).
+    """
+    __tablename__ = "stage_best"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    stage_id = Column(String, nullable=False, index=True)
+    score = Column(Integer, nullable=False)
+    hints_used = Column(Integer, default=0, nullable=False)
+    time_seconds = Column(Integer, nullable=False)
+    groups = Column(JSONB, nullable=True)  # Detalles del mejor intento
+    achieved_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('user_id', 'stage_id', name='uix_user_stage_best'),
+    )
+
+    user = relationship("User", back_populates="stage_bests")
+
+
+class StageRun(database.Base):
+    """
+    Historial de corridas individuales por etapa.
+    Index compuesto en (user_id, stage_id, created_at) para queries de historial.
+    """
+    __tablename__ = "stage_runs"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    stage_id = Column(String, nullable=False)
+    score = Column(Integer, nullable=False)
+    hints_used = Column(Integer, default=0, nullable=False)
+    time_seconds = Column(Integer, nullable=False)
+    groups = Column(JSONB, nullable=True)  # Detalles de esta corrida
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    __table_args__ = (
+        Index('ix_stage_runs_user_stage_created', 'user_id', 'stage_id', 'created_at'),
+    )
+
+    user = relationship("User", back_populates="stage_runs")

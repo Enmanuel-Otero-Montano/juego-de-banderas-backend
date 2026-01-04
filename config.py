@@ -31,8 +31,9 @@ class Settings(BaseSettings):
     VERIFICATION_LINK: str | None = None
     BASE_URL: str = "http://127.0.0.1:5500"
 
-    # Daily Challenge
-    DAILY_MAX_ATTEMPTS: int = 4
+    # Career Mode Scoring
+    MAX_STAGE_SCORE_SAFE: int = 500  # Fallback si no se puede inferir total_flags
+    MAX_FLAGS_PER_STAGE: int = 30
 
     @field_validator("DATABASE_URL")
     @classmethod

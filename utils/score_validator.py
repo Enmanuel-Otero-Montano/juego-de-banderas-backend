@@ -28,13 +28,21 @@ def validate_score_legitimacy(
     # 1. Check Score Limits per Mode
     # Career mode has a hard limit of roughly 2000 points (approximate depending on implementation, 
     # but prompts says "máximo 2000 pts"). We'll use strict > 2000 rejection for now.
+    from config import settings
+    from config import settings
     if metadata.game_mode == 'career':
-        if score > 2000:
-            logger.warning(f"Rejected suspicious score: {score} in career mode (limit 2000)")
-            raise HTTPException(
-                status_code=422, 
-                detail="Score too high for career mode. Maximum allowed is 2000."
-            )
+        # Para legacy /scores endpoint, usamos el Safe fallback o una lógica básica si no hay StageCompleteRequest
+        # El endpoint de career tiene su propia validación más profunda.
+        if score > settings.MAX_STAGE_SCORE_SAFE:
+            # Si el score es muy alto (ej > 500) y no sabemos cuántas banderas eran, es sospechoso en legacy /scores
+            logger.warning(f"Suspicious score in legacy /scores for career: {score} (safe limit {settings.MAX_STAGE_SCORE_SAFE})")
+            # Podríamos dejarlo pasar si confiamos en el score_validator para otras cosas, 
+            # pero el usuario pide quitar el viejo 2000.
+            if score > 1000: # Límite de sanity absoluto
+                raise HTTPException(
+                    status_code=422, 
+                    detail=f"Score too high. Maximum theoretical for current configuration is exceeded."
+                )
             
         # 2. Check Time vs Score implementation
         # Requirement: "mínimo 2 minutos para completar modo carrera"
@@ -71,8 +79,8 @@ def validate_score_legitimacy(
     # We will log or warn, but maybe strict rejection is too aggressive if they just like playing perfect games.
     # However, strict requirement: "reject si siempre obtiene puntaje perfecto".
     
-    if user_history and score == 2000:
-        if user_history.max_score == 2000 and user_history.last_score == 2000:
+    if user_history and score >= settings.MAX_STAGE_SCORE_SAFE:
+        if user_history.max_score >= settings.MAX_STAGE_SCORE_SAFE and user_history.last_score >= settings.MAX_STAGE_SCORE_SAFE:
             # They already have a perfect score and their last score was perfect. 
             # Submitting another perfect score *might* be legit practice, but per requirements we flag/reject.
             # To be safe against "false positives" of good players, we might skip this or make it very specific.

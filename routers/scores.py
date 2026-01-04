@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException, Response
 from sqlalchemy.orm import Session
 from typing import Annotated, Optional
 
@@ -9,35 +9,29 @@ from dependencies import get_current_active_user, get_db  # <-- Cambio aquí
 
 router = APIRouter(prefix="/scores", tags=["scores"])
 
-def normalize_region(input_region: str | None) -> str:
+def normalize_region(input_region: str | None) -> str | None:
     """
     Normalizes a region string (URL or key) to a valid RegionEnum key.
-    Defaults to 'career' if invalid or None.
+    Returns None if invalid or cannot be inferred.
     """
     if not input_region:
-        return "career"
+        return None
+    
+    target = input_region.lower()
     
     # Handle URLs (frontend sends location.href)
-    # Example: https://banderas.com/game -> career
-    # Example: https://banderas.com/game/america -> america
+    if "http" in target or "/" in target:
+        import os
+        # Obtener path y quitar extensión si existe (ej: career-mode.html -> career-mode)
+        path = target.rstrip("/").split("/")[-1]
+        target = os.path.splitext(path)[0]
     
-    # Simple check: does it look like a URL?
-    if "http" in input_region or "/" in input_region:
-        parts = input_region.rstrip("/").split("/")
-        last_part = parts[-1].lower()
-        
-        # Check if last part is a valid region
-        if last_part in RegionEnum.__members__:
-            return last_part
-        else:
-            # If URL doesn't end in a known region, assume career (e.g. /game)
-            return "career"
+    # Detectar región por "contiene" (ej: "career-mode" contiene "career")
+    for region in RegionEnum.__members__:
+        if region in target:
+            return region
     
-    # If it's just a string, check if it's a valid key
-    if input_region.lower() in RegionEnum.__members__:
-        return input_region.lower()
-    
-    return "career"
+    return None
 
 @router.post("/")
 async def save_score(
@@ -45,30 +39,44 @@ async def save_score(
     score_data: score.ScoreRequest,
     db: Annotated[Session, Depends(get_db)]
 ):
-    """Guarda un nuevo score del usuario"""
+    """
+    Guarda un nuevo score del usuario.
+    
+    GATING: El frontend detecta el modo por URL, pero el backend NO confía
+    y decide por game_mode + inferencias. Solo modo carrera persiste.
+    Modo regiones retorna 204 No Content (no-op).
+    """
     # 0. Determine Region
     region_key = normalize_region(score_data.game_region)
     
-    # 1. Fetch user history for validation (for this specific region)
-    user_history = scores_repo.get_user_best_score(db, current_user.id, region_key)
+    # 1. GATING: Solo persistir en modo carrera
+    from utils.career_gating import should_persist_score
+    if not should_persist_score(score_data.game_mode, region_key, score_data.game_region):
+        # No-op para modo regiones - no persistir nada
+        return Response(status_code=204)
     
-    # 2. Validate score
+    # Fallback to career if it passed gating but region_key is None (should not happen with regular career inputs)
+    effective_region = region_key or "career"
+    
+    # 2. Fetch user history for validation (for this specific region)
+    user_history = scores_repo.get_user_best_score(db, current_user.id, effective_region)
+    
+    # 3. Validate score
     from utils.score_validator import validate_score_legitimacy
     # Note: Validator warns/raises but returns True if valid
     validate_score_legitimacy(score_data.score, score_data, user_history)
     
-    # 3. Save score
+    # 4. Save score (legacy overall_score_table)
     # Use user's country from profile as the country_code for the score
     result = scores_repo.save_score(
         db=db, 
         score=score_data.score, 
         current_user=current_user,
-        region_key=region_key,
+        region_key=effective_region,
         country_code=current_user.country
     )
     return result
 
-@router.get("/me/best")
 @router.get("/me/best")
 async def get_my_best_score(
     current_user: Annotated[user_schema.User, Depends(get_current_active_user)],
