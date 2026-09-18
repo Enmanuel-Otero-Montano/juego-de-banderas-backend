@@ -40,7 +40,10 @@ def _safe_drop_index(index_names, table_name: str, schema: str = "public"):
                 op.drop_index(name, table_name=table_name, schema=schema)
 # -----------------------------
 
-FK_NAME = op.f("fk_overall_score_table_user_id_users")
+# ``op`` is only available while Alembic is executing a migration.  Keeping a
+# concrete name here lets Alembic load the revision graph for commands such as
+# ``alembic heads`` and ``alembic upgrade``.
+FK_NAME = "fk_overall_score_table_user_id_users"
 
 def upgrade() -> None:
     # Añadir user_id solo si no existe
