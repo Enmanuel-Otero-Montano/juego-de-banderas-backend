@@ -14,6 +14,7 @@ PyJWT==2.14.0
 pwdlib[argon2,bcrypt]==0.3.1
 # Conserva la verificación de hashes históricos; los accesos correctos se
 # migran automáticamente a Argon2id.
+passlib[bcrypt]==1.7.4
 bcrypt==4.3.0
 
 Pillow==12.3.0
