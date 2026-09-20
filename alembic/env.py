@@ -30,6 +30,10 @@ def include_object(object, name, type_, reflected, compare_to):
     """Excluir objetos que no querés versionar (p.ej. tabla de control de Alembic)."""
     if type_ == "table" and name == "alembic_version":
         return False
+    # Tabla histórica del sitio web: se conserva en la base para no destruir
+    # datos, pero ya no forma parte del modelo usado por la app Android.
+    if type_ == "table" and name == "overall_score_table":
+        return False
     return True
 
 

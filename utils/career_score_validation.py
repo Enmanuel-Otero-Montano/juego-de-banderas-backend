@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from fastapi import HTTPException
 from schemas.score import StageCompleteRequest
-from config import settings
+from utils.career_scoring import get_difficulty_config
 
 def infer_total_flags(stage_data: StageCompleteRequest) -> int | None:
     """
@@ -24,12 +24,12 @@ def compute_max_stage_score(total_flags: int) -> int:
     """
     Calcula el puntaje máximo teórico por etapa:
     - 10 puntos por bandera
-    - 20 puntos bonus pistas (máximo)
-    - 15 puntos bonus tiempo (máximo)
+    - 5 puntos de ruta limpia (máximo)
+    - 5 puntos bonus tiempo (máximo)
     """
-    return (10 * total_flags) + 20 + 15
+    return (10 * total_flags) + 5 + 5
 
-def validate_stage_score(stage_data: StageCompleteRequest):
+def validate_stage_score(stage_data: StageCompleteRequest, expected_codes: list[str]):
     """
     Valida la integridad de los datos recibidos.
     """
@@ -37,27 +37,38 @@ def validate_stage_score(stage_data: StageCompleteRequest):
     if stage_data.score < 0:
         raise HTTPException(status_code=422, detail="Score cannot be negative")
     
-    if stage_data.time_seconds <= 0:
-        raise HTTPException(status_code=422, detail="time_seconds must be positive")
+    if stage_data.time_seconds < 0:
+        raise HTTPException(status_code=422, detail="time_seconds cannot be negative")
         
-    if not (0 <= stage_data.hints_used <= 2):
-        raise HTTPException(status_code=422, detail="hints_used must be between 0 and 2")
+    config = get_difficulty_config(stage_data.difficulty)
+    if len(stage_data.answers) != config['flags_total']:
+        raise HTTPException(status_code=422, detail=f"{stage_data.difficulty} requires {config['flags_total']} answers")
 
-    # 2. Validar grupos
-    if not stage_data.groups or len(stage_data.groups) == 0:
-        raise HTTPException(status_code=422, detail="groups cannot be empty")
-    
-    for i, g in enumerate(stage_data.groups):
-        if not isinstance(g, dict):
-            raise HTTPException(status_code=422, detail=f"Group {i} must be an object")
-            
-        flags_count = g.get("flags_count", 0)
-        correct = g.get("correct", 0)
-        
-        if flags_count <= 0:
-            raise HTTPException(status_code=422, detail=f"Group {i}: flags_count must be > 0")
-            
-        if correct < 0 or correct > flags_count:
-            raise HTTPException(status_code=422, detail=f"Group {i}: correct ({correct}) must be between 0 and {flags_count}")
+    codes = [answer.country_code.lower() for answer in stage_data.answers]
+    if len(set(codes)) != len(codes):
+        raise HTTPException(status_code=422, detail="country codes must be unique within a stage")
+    if set(codes) != set(expected_codes):
+        raise HTTPException(status_code=422, detail="answers do not match the server-issued attempt")
+    expected = set(expected_codes)
+    if any(selected not in expected for answer in stage_data.answers for selected in answer.selected_codes):
+        raise HTTPException(status_code=422, detail="selected country does not belong to the server-issued attempt")
 
     return True
+
+
+def authoritative_answers(stage_data: StageCompleteRequest) -> list[dict]:
+    """Deriva el resultado desde la secuencia de selecciones, no desde flags del cliente."""
+    result: list[dict] = []
+    for answer in stage_data.answers:
+        country_code = answer.country_code.lower()
+        selected_codes = [code.lower() for code in answer.selected_codes]
+        correct = bool(selected_codes and selected_codes[-1] == country_code)
+        wrong_attempts = sum(1 for code in selected_codes if code != country_code)
+        result.append({
+            "country_code": country_code,
+            "selected_codes": selected_codes,
+            "correct": correct,
+            "used_hint": answer.used_hint,
+            "wrong_attempts": wrong_attempts,
+        })
+    return result

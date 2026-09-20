@@ -34,9 +34,9 @@ async def health_ready(request: Request, db: Session = Depends(get_db)):
             execution_options={"timeout": 1, "statement_timeout": 1000}
         ).scalar()
         return {"status": "ok"}
-    except Exception as e:
-        # Internal log only, don't expose details to the user
-        logger.error(f"Health check failed: Database is down or unreachable. Error: {str(e)}")
+    except Exception:
+        # El detalle queda únicamente en logs; la respuesta no filtra la conexión.
+        logger.exception("Health readiness check failed")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"status": "fail", "db": "down"}

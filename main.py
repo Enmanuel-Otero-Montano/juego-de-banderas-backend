@@ -3,7 +3,7 @@ from datetime import timedelta, datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Depends, status, Body, Form, UploadFile, File, Query, Request, Cookie
 
-from fastapi.security import HTTPBasic, OAuth2PasswordRequestForm, OAuth2PasswordBearer
+from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from fastapi.responses import RedirectResponse, Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
@@ -18,7 +18,11 @@ from utils.limiter import limiter
 
 from sqlalchemy.orm import Session
 from config import settings
-from passlib.context import CryptContext
+from pwdlib import PasswordHash
+from pwdlib.exceptions import UnknownHashError
+from pwdlib.hashers.argon2 import Argon2Hasher
+from pwdlib.hashers.bcrypt import BcryptHasher
+from pydantic import EmailStr
 
 import smtplib
 from email.mime.text import MIMEText
@@ -26,9 +30,9 @@ from email.mime.text import MIMEText
 from PIL import Image
 from io import BytesIO
 
-from repository import register_login, scores_repo
+from repository import register_login
 from schemas import user_schema, token
-from routers import scores, users, daily_challenge, health, career
+from routers import users, daily_challenge, health, career
 from db import database, models
 
 import jwt
@@ -41,21 +45,22 @@ import logging
 from logging.handlers import RotatingFileHandler
 import sys
 
-from schemas.user_schema import UserRegisterResponse, OverallScorePublic
+from schemas.user_schema import UserRegisterResponse
 
-database.Base.metadata.create_all(bind=database.engine)
+# Las migraciones de Alembic son la única autoridad de esquema en producción.
+# create_all se conserva en desarrollo/test para facilitar el arranque local.
+if settings.ENV != "production":
+    database.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI()
 
 # Configurar logging
 def setup_logging():
-    # Crear directorio de logs si no existe
-    import os
-    os.makedirs("logs", exist_ok=True)
-    
-    # Configuración del logger
-    logger = logging.getLogger()
+    logger = logging.getLogger("atlas")
     logger.setLevel(logging.INFO if settings.ENV == "production" else logging.DEBUG)
+    logger.propagate = False
+    if logger.handlers:
+        return logger
     
     # Formato
     formatter = logging.Formatter(
@@ -63,19 +68,25 @@ def setup_logging():
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
-    # Handler para archivo (rotación automática)
-    file_handler = RotatingFileHandler(
-        'logs/app.log',
-        maxBytes=10*1024*1024,  # 10MB
-        backupCount=5
-    )
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-    
-    # Handler para consola
+    # En producción se escribe únicamente a stdout: funciona en contenedores
+    # con filesystem de solo lectura y deja la persistencia al proveedor.
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
+
+    if settings.ENV != "production":
+        import os
+        try:
+            os.makedirs("logs", exist_ok=True)
+            file_handler = RotatingFileHandler(
+                "logs/app.log",
+                maxBytes=10 * 1024 * 1024,
+                backupCount=5,
+            )
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+        except OSError:
+            logger.warning("No se pudo crear el log local; se mantiene únicamente stdout")
     
     return logger
 
@@ -97,13 +108,12 @@ async def custom_rate_limit_handler(request: Request, exc: RateLimitExceeded):
         },
     )
 
-security = HTTPBasic()
-
 # === CORS estricto según entorno ===
 # En dev añadimos orígenes locales comunes
 _local_dev = [
     "http://127.0.0.1:5500", "http://localhost:5500",
-    "http://localhost:5173", "http://localhost:3000"
+    "http://127.0.0.1:5173", "http://localhost:5173", "http://localhost:3000",
+    "capacitor://localhost", "https://localhost"
 ]
 allow_origins = (
     settings.ALLOWED_ORIGINS
@@ -121,7 +131,6 @@ app.add_middleware(
     max_age=600,
 )
 
-app.include_router(scores.router)
 app.include_router(users.user_router)
 app.include_router(daily_challenge.router)
 app.include_router(health.router)
@@ -142,7 +151,7 @@ async def http_exc_handler(request: Request, exc: StarletteHTTPException):
 @app.exception_handler(RequestValidationError)
 async def validation_exc_handler(request: Request, exc: RequestValidationError):
     return JSONResponse(
-        status_code=starlette_status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=starlette_status.HTTP_422_UNPROCESSABLE_CONTENT,
         content={
             "error": 422,
             "message": "Parámetros inválidos",
@@ -170,7 +179,6 @@ async def unhandled_exc_handler(request: Request, exc: Exception):
         },
     )
 
-security = HTTPBasic()
 # Variables de entorno
 SECRET_KEY = settings.SECRET_KEY.get_secret_value()
 ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
@@ -184,7 +192,7 @@ BASE_URL = settings.BASE_URL
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+password_hash = PasswordHash((Argon2Hasher(), BcryptHasher()))
 
 
 def get_db():
@@ -199,23 +207,31 @@ def get_db():
 @limiter.limit("5/hour")  # Máximo 5 registros por hora por IP
 async def register_user(
     request: Request,
-    username: Annotated[str, Form()],
-    full_name: Annotated[str, Form()],
-    email: Annotated[str, Form()],
-    password: Annotated[str, Form()],
-    profile_image: Annotated[UploadFile, File()],
+    username: Annotated[str, Form(min_length=3, max_length=24)],
+    email: Annotated[EmailStr, Form()],
+    password: Annotated[str, Form(min_length=8, max_length=128)],
+    full_name: Annotated[Optional[str], Form(max_length=120)] = None,
+    profile_image: Annotated[Optional[UploadFile], File()] = None,
     db: Session = Depends(get_db)
 ):
-    logger.info(f"Nuevo registro de usuario: {email}")
+    logger.info("Nueva solicitud de registro")
+    username = username.strip()
+    email = str(email).strip().lower()
+    full_name = full_name.strip() if full_name else None
+    if len(username) < 3:
+        raise HTTPException(status_code=422, detail="Username must contain at least 3 non-space characters")
+    # bcrypt procesa como máximo 72 bytes; rechazar evita truncamientos silenciosos.
+    if len(password.encode("utf-8")) > 72:
+        raise HTTPException(status_code=422, detail="Password must be at most 72 bytes")
     if register_login.check_username_exist(db, username):  # <-- NUEVO
         raise HTTPException(status_code=400, detail="Username already taken")
     db_user = register_login.check_user_exist(db, email)
-    image_content = await profile_image.read()
+    image_content = await profile_image.read() if profile_image else None
 
     if db_user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
     
-    if len(image_content) > 2 * 1024 * 1024:  # Limite de 2MB como ejemplo
+    if image_content and len(image_content) > 2 * 1024 * 1024:  # Limite de 2MB como ejemplo
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Image too large")
     
     hashed_password = get_password_hash(password)
@@ -232,8 +248,13 @@ async def register_user(
 
     name = full_name if full_name else username
 
-    verification_token = create_email_verification_token(email)
-    send_verification_email(email, verification_token, name)
+    # En desarrollo local puede no haber SMTP configurado; el alta no debe
+    # fallar por eso. En producción se envía la verificación normalmente.
+    if SMTP_SERVER and SMTP_PORT and SENDER_EMAIL and SENDER_PASSWORD and VERIFICATION_LINK:
+        verification_token = create_email_verification_token(email)
+        send_verification_email(email, verification_token, name)
+    else:
+        logger.warning("Registro creado sin correo de verificación: SMTP no configurado")
     return new_user
 
 
@@ -281,8 +302,8 @@ def send_verification_email(email: str, token: str, name: str):
             server.starttls()
             server.login(sender_email, sender_password)
             server.sendmail(sender_email, email, msg.as_string())
-    except Exception as e:
-        print(f"Error enviando correo: {e}")
+    except Exception:
+        logger.exception("No se pudo enviar el correo de verificación")
 
 
 @app.get("/verify-email")
@@ -311,30 +332,32 @@ def verify_email(token: str, db: Session = Depends(get_db)):
 @limiter.limit("3/hour")  # Máximo 3 reenvíos por hora por IP
 def resend_verification_email(
     request: Request,
-    email: Annotated[str, Body()],
+    email: Annotated[EmailStr, Body()],
     db: Session = Depends(get_db)
 ):
-    user = db.query(models.User).filter(models.User.email == email).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    if user.is_verified:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already verified")
+    normalized_email = str(email).strip().lower()
+    user = db.query(models.User).filter(models.User.email == normalized_email).first()
+    if user and not user.is_verified:
+        if SMTP_SERVER and SMTP_PORT and SENDER_EMAIL and SENDER_PASSWORD and VERIFICATION_LINK:
+            verification_token = create_email_verification_token(user.email)
+            name = user.full_name if user.full_name else user.username
+            send_verification_email(user.email, verification_token, name)
+        else:
+            logger.warning("No se reenvió la verificación: SMTP no configurado")
 
-    # Generar un nuevo token y reenviar el correo
-    verification_token = create_email_verification_token(user.email)
-    name = user.full_name if user.full_name else user.username
-    send_verification_email(user.email, verification_token, name)
-
-
-    return {"msg": "Verification email resent successfully"}
+    # Respuesta uniforme para no revelar si el correo tiene una cuenta.
+    return {"msg": "If the account requires verification, an email was sent"}
 
 
 def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return password_hash.verify(plain_password, hashed_password)
+    except (UnknownHashError, ValueError):
+        return False
 
 
 def get_password_hash(password):
-    return pwd_context.hash(password)
+    return password_hash.hash(password)
 
 
 def get_user(db, username_or_email: str):
@@ -349,8 +372,15 @@ def authenticate_user(username: str, password: str, db: Session):
     user = get_user(db, username)
     if not user:
         return False
-    if not verify_password(password, user.hashed_password):
+    try:
+        valid, updated_hash = password_hash.verify_and_update(password, user.hashed_password)
+    except (UnknownHashError, ValueError):
         return False
+    if not valid:
+        return False
+    if updated_hash:
+        user.hashed_password = updated_hash
+        db.commit()
     return user
 
 
@@ -405,12 +435,12 @@ async def login_for_access_token(
 ):
     user = authenticate_user(form_data.username, form_data.password, db)
     if not user:
-        logger.warning(f"Intento de login fallido para: {form_data.username}")
+        logger.warning("Intento de login fallido")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                             detail={"message": "Usuario o contraseña incorrectos"},
                             headers={"WWW-Authenticate": "Bearer"}, )
     
-    logger.info(f"Login exitoso: {user.username}")
+    logger.info("Login exitoso")
     if user and not user.is_verified:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                             detail={"message": "Usuario no verificado", "email": user.email},
@@ -501,6 +531,8 @@ async def read_users_me(current_user: Annotated[user_schema.User, Depends(get_cu
         "full_name": current_user.full_name,
         "is_active": current_user.is_active,
         "country": current_user.country,
+        "ranking_alias": current_user.ranking_alias,
+        "ranking_region": current_user.ranking_region,
         "profile_image_url": f"/user/{current_user.id}/profile_image",
         "onboarding_completed": current_user.onboarding_completed,
     }
@@ -521,25 +553,6 @@ async def update_onboarding(
         return {"message": "Onboarding status updated successfully", "onboarding_completed": updated_user.onboarding_completed}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-
-
-@app.post("/save-overall-score")
-async def save_overall_score(
-    current_user: Annotated[user_schema.User, Depends(get_current_active_user)],
-    score_to_save: user_schema.ScoreRequest,
-    db: Annotated[Session, Depends(get_db)]
-):
-    score = scores_repo.save_score(db, score_to_save.score, current_user)
-    return score
-
-
-@app.get("/overall-scores", response_model=list[OverallScorePublic])
-def overall_scores_public(
-    limit: int = Query(50, ge=1, le=500),
-    offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
-):
-    return scores_repo.get_public_ranking(db, limit, offset)
 
 
 @app.put("/user/profile", response_model=user_schema.UserRegisterResponse)

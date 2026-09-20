@@ -1,4 +1,5 @@
 import hashlib
+import logging
 from datetime import date, datetime
 from typing import Optional
 
@@ -13,6 +14,8 @@ from schemas import daily_challenge_schema
 from config import settings
 
 REST_COUNTRIES_URL = "https://restcountries.com/v3.1/all?fields=name,flags,cca2,cca3,region,subregion,capital,latlng,population,languages"
+HTTP_TIMEOUT_SECONDS = 10
+logger = logging.getLogger("atlas.daily_challenge")
 
 
 def get_deterministic_country(date_obj: date):
@@ -22,11 +25,11 @@ def get_deterministic_country(date_obj: date):
     Returns the country dict (name, flags, cca2, cca3).
     """
     try:
-        response = requests.get(REST_COUNTRIES_URL)
+        response = requests.get(REST_COUNTRIES_URL, timeout=HTTP_TIMEOUT_SECONDS)
         response.raise_for_status()
         data = response.json()
-    except requests.RequestException as e:
-        print(f"Error fetching countries: {e}")
+    except requests.RequestException:
+        logger.exception("No se pudo obtener el catálogo de países")
         raise ValueError("Could not fetch countries")
 
     # Filter invalid countries
@@ -66,11 +69,11 @@ def ensure_today_challenge(db: Session, today: date) -> models.DailyChallenge:
     flag_url = country_data["flags"]["png"]
     
     try:
-        flag_response = requests.get(flag_url)
+        flag_response = requests.get(flag_url, timeout=HTTP_TIMEOUT_SECONDS)
         flag_response.raise_for_status()
         flag_bytes = flag_response.content
-    except requests.RequestException as e:
-        print(f"Error downloading flag: {e}")
+    except requests.RequestException:
+        logger.exception("No se pudo descargar la bandera diaria")
         # In production, we might want a fallback or retry, but for now we fail hard as requested
         raise ValueError(f"Could not download flag from {flag_url}")
 

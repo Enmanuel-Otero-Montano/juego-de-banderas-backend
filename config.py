@@ -2,7 +2,7 @@
 from functools import lru_cache
 from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import field_validator, model_validator, SecretStr
+from pydantic import Field, field_validator, model_validator, SecretStr
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: list[str] = []
 
     # Otros (con defaults / cast autom.)
-    ALGORITHM: str = "HS256"
+    ALGORITHM: Literal["HS256"] = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: float = 2880
 
     SMTP_SERVER: str | None = None
@@ -30,6 +30,9 @@ class Settings(BaseSettings):
 
     VERIFICATION_LINK: str | None = None
     BASE_URL: str = "http://127.0.0.1:5500"
+
+    # Daily Challenge
+    DAILY_MAX_ATTEMPTS: int = Field(default=4, ge=3, le=6)
 
     # Career Mode Scoring
     MAX_STAGE_SCORE_SAFE: int = 500  # Fallback si no se puede inferir total_flags
@@ -59,6 +62,30 @@ class Settings(BaseSettings):
                 raise ValueError("ALLOWED_ORIGINS vacío en producción.")
             if "*" in self.ALLOWED_ORIGINS:
                 raise ValueError("CORS wildcard (*) prohibido en producción (DoD).")
+            if len(self.SECRET_KEY.get_secret_value()) < 32:
+                raise ValueError("SECRET_KEY debe tener al menos 32 caracteres en producción.")
+
+            database_url = self.DATABASE_URL.get_secret_value()
+            if not database_url.startswith(("postgresql://", "postgresql+psycopg2://")):
+                raise ValueError("DATABASE_URL debe apuntar a PostgreSQL en producción.")
+
+            required_mail = {
+                "SMTP_SERVER": self.SMTP_SERVER,
+                "SMTP_PORT": self.SMTP_PORT,
+                "SENDER_EMAIL": self.SENDER_EMAIL,
+                "SENDER_PASSWORD": self.SENDER_PASSWORD,
+                "VERIFICATION_LINK": self.VERIFICATION_LINK,
+            }
+            missing_mail = [name for name, value in required_mail.items() if not value]
+            if missing_mail:
+                raise ValueError(
+                    "Configuración de verificación por correo incompleta en producción: "
+                    + ", ".join(missing_mail)
+                )
+            if not self.VERIFICATION_LINK.startswith("https://"):
+                raise ValueError("VERIFICATION_LINK debe usar HTTPS en producción.")
+            if not self.BASE_URL.startswith("https://"):
+                raise ValueError("BASE_URL debe usar HTTPS en producción.")
         return self
 
 @lru_cache

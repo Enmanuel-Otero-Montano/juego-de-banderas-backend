@@ -1,0 +1,12 @@
+.env
+.git
+.gitignore
+.idea
+.pytest_cache
+.vscode
+__pycache__
+*.py[cod]
+*.log
+banderas-paises-regiones-venv
+logs
+tests
