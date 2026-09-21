@@ -2,7 +2,7 @@
 """Authoritative, player-readable scoring for career stages.
 
 Every resolved flag is worth 10 points cleanly, 5 after a mistake, or 2 after
-a hint. Time can add at most five points, so knowing flags always matters more
+a hint. Time can add at most ten points, so knowing flags always matters more
 than tapping quickly.
 """
 from typing import TypedDict
@@ -38,7 +38,7 @@ def calculate_score(answers: list[dict], time_seconds: int, difficulty: str) -> 
     hints_used = sum(1 for answer in answers if answer.get('used_hint', False))
     mistakes = sum(int(answer.get('wrong_attempts', 0)) for answer in answers)
     remaining = max(0, config['time_limit'] - time_seconds)
-    time_bonus = min(5, remaining // 15)
+    time_bonus = min(10, remaining // 10)
     clean_bonus = 5 if hints_used == 0 and mistakes == 0 else 0
     return {
         'score': base_score + time_bonus + clean_bonus,
@@ -68,4 +68,4 @@ def compute_stage_score(
     for group in groups or []:
         correct = int(group.get('correct', 0))
         total += (5 if group.get('had_errors', False) else 10) * correct
-    return total + min(5, max(0, get_difficulty_config(difficulty)['time_limit'] - time_seconds) // 15)
+    return total + min(10, max(0, get_difficulty_config(difficulty)['time_limit'] - time_seconds) // 10)

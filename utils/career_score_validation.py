@@ -25,9 +25,9 @@ def compute_max_stage_score(total_flags: int) -> int:
     Calcula el puntaje máximo teórico por etapa:
     - 10 puntos por bandera
     - 5 puntos de ruta limpia (máximo)
-    - 5 puntos bonus tiempo (máximo)
+    - 10 puntos bonus tiempo (máximo)
     """
-    return (10 * total_flags) + 5 + 5
+    return (10 * total_flags) + 5 + 10
 
 def validate_stage_score(stage_data: StageCompleteRequest, expected_codes: list[str]):
     """

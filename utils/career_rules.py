@@ -5,7 +5,7 @@ nueva versión/temporada; nunca se reinterpreta una marca histórica.
 """
 
 CURRENT_SEASON_ID = "season-1"
-CURRENT_RULESET_VERSION = 1
+CURRENT_RULESET_VERSION = 2
 CURRENT_CONTENT_VERSION = 1
 MIN_PASS_RATIO = 0.70
 ATTEMPT_TTL_SECONDS = 180

@@ -102,7 +102,7 @@ def create_attempt(stage_id: int, difficulty: str, codes: list[str], route_posit
             "difficulty": difficulty,
             "country_codes": codes,
             "season_id": "season-1",
-            "ruleset_version": 1,
+            "ruleset_version": 2,
             "content_version": 1,
             "app_version": "1.0.0-test",
         },
@@ -118,7 +118,7 @@ def stage_payload(stage_id: str, difficulty: str, codes: list[str], time_seconds
         "stage_id": stage_id,
         "route_position": int(stage_id),
         "season_id": "season-1",
-        "ruleset_version": 1,
+        "ruleset_version": 2,
         "content_version": 1,
         "game_mode": "career",
         "difficulty": difficulty,
@@ -131,9 +131,9 @@ def stage_payload(stage_id: str, difficulty: str, codes: list[str], time_seconds
 def test_scoring_is_authoritative_and_explainable():
     result = calculate_score(answers(list(STAGE_COUNTRY_CODES[1])[:10]), time_seconds=35, difficulty="normal")
     assert result == {
-        "score": 91,
+        "score": 93,
         "base_score": 87,
-        "time_bonus": 4,
+        "time_bonus": 6,
         "clean_bonus": 0,
         "hints_used": 1,
         "mistakes": 1,
@@ -153,7 +153,7 @@ def test_profile_stage_and_leaderboard_contract():
         json=stage_payload("1", "normal", list(STAGE_COUNTRY_CODES[1])[:10], 35),
     )
     assert completed.status_code == 200
-    assert completed.json()["stage_best"]["score"] == 92
+    assert completed.json()["stage_best"]["score"] == 96
     assert completed.json()["stage_best"]["hints_used"] == 1
     assert completed.json()["stage_best"]["mistakes"] == 1
 
@@ -171,7 +171,7 @@ def test_profile_stage_and_leaderboard_contract():
         "region": "Americas",
         "difficulty": "normal",
         "stages_completed": 1,
-        "total_score": 92,
+        "total_score": 96,
         "total_hints_used": 1,
         "total_mistakes": 1,
     }
@@ -190,8 +190,8 @@ def test_difficulties_are_ranked_separately():
 
     normal_board = client.get("/career/leaderboard?difficulty=normal").json()
     easy_board = client.get("/career/leaderboard?difficulty=easy").json()
-    assert normal_board["items"][0]["total_score"] == 92
-    assert easy_board["items"][0]["total_score"] == 72
+    assert normal_board["items"][0]["total_score"] == 96
+    assert easy_board["items"][0]["total_score"] == 77
     assert normal_board["items"][0]["difficulty"] == "normal"
     assert easy_board["items"][0]["difficulty"] == "easy"
 
@@ -238,7 +238,7 @@ def test_ranked_progression_cannot_skip_route_positions():
             "difficulty": "easy",
             "country_codes": list(STAGE_COUNTRY_CODES[2])[:8],
             "season_id": "season-1",
-            "ruleset_version": 1,
+            "ruleset_version": 2,
             "content_version": 1,
         },
     )
