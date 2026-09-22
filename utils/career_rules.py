@@ -5,9 +5,9 @@ nueva versión/temporada; nunca se reinterpreta una marca histórica.
 """
 
 CURRENT_SEASON_ID = "season-1"
-CURRENT_RULESET_VERSION = 2
+CURRENT_RULESET_VERSION = 3
 CURRENT_CONTENT_VERSION = 1
-MIN_PASS_RATIO = 0.70
+MIN_PASS_RATIO = 1.0
 ATTEMPT_TTL_SECONDS = 180
 
 RANKED_STAGE_IDS = frozenset(range(1, 13))

@@ -37,9 +37,10 @@ def calculate_score(answers: list[dict], time_seconds: int, difficulty: str) -> 
     base_score = sum(score_answer(answer) for answer in answers)
     hints_used = sum(1 for answer in answers if answer.get('used_hint', False))
     mistakes = sum(int(answer.get('wrong_attempts', 0)) for answer in answers)
+    completed = bool(answers) and all(answer.get('correct', False) for answer in answers)
     remaining = max(0, config['time_limit'] - time_seconds)
-    time_bonus = min(10, remaining // 10)
-    clean_bonus = 5 if hints_used == 0 and mistakes == 0 else 0
+    time_bonus = min(10, remaining // 10) if completed else 0
+    clean_bonus = 5 if completed and hints_used == 0 and mistakes == 0 else 0
     return {
         'score': base_score + time_bonus + clean_bonus,
         'base_score': base_score,

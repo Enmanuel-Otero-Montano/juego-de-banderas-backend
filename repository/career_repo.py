@@ -217,3 +217,49 @@ def get_me_stats(db: Session, user_id: int, season_id: str, difficulty: str) -> 
         } if last_run else None,
         "leaderboard_rank": rank
     }
+
+
+def get_run_history(
+    db: Session,
+    user_id: int,
+    season_id: str,
+    difficulty: str,
+    limit: int,
+) -> dict:
+    """Devuelve los intentos de Viaje más recientes del usuario."""
+    from utils.career_rules import CURRENT_CONTENT_VERSION, CURRENT_RULESET_VERSION
+    from utils.career_scoring import get_difficulty_config
+
+    query = db.query(StageRun).filter(
+        StageRun.user_id == user_id,
+        StageRun.season_id == season_id,
+        StageRun.ruleset_version == CURRENT_RULESET_VERSION,
+        StageRun.content_version == CURRENT_CONTENT_VERSION,
+        StageRun.difficulty == difficulty,
+    )
+    total = query.count()
+    runs = query.order_by(StageRun.created_at.desc()).limit(limit).all()
+    flags_total = get_difficulty_config(difficulty)['flags_total']
+
+    return {
+        "items": [
+            {
+                "stage_run_id": run.id,
+                "attempt_id": run.attempt_id,
+                "stage_id": run.stage_id,
+                "route_position": run.route_position,
+                "difficulty": run.difficulty,
+                "correct_answers": run.correct_answers,
+                "flags_total": flags_total,
+                "score": run.score,
+                "mistakes": run.mistakes,
+                "hints_used": run.hints_used,
+                "time_seconds": run.time_seconds,
+                "passed": run.passed,
+                "played_at": run.created_at,
+            }
+            for run in runs
+        ],
+        "total": total,
+        "season_id": season_id,
+    }

@@ -102,7 +102,7 @@ def create_attempt(stage_id: int, difficulty: str, codes: list[str], route_posit
             "difficulty": difficulty,
             "country_codes": codes,
             "season_id": "season-1",
-            "ruleset_version": 2,
+            "ruleset_version": 3,
             "content_version": 1,
             "app_version": "1.0.0-test",
         },
@@ -118,7 +118,7 @@ def stage_payload(stage_id: str, difficulty: str, codes: list[str], time_seconds
         "stage_id": stage_id,
         "route_position": int(stage_id),
         "season_id": "season-1",
-        "ruleset_version": 2,
+        "ruleset_version": 3,
         "content_version": 1,
         "game_mode": "career",
         "difficulty": difficulty,
@@ -140,6 +140,16 @@ def test_scoring_is_authoritative_and_explainable():
     }
 
 
+def test_incomplete_stage_does_not_receive_completion_bonuses():
+    result = calculate_score(
+        answers(list(STAGE_COUNTRY_CODES[1])[:10], correct_count=9),
+        time_seconds=5,
+        difficulty="normal",
+    )
+    assert result["time_bonus"] == 0
+    assert result["clean_bonus"] == 0
+
+
 def test_profile_stage_and_leaderboard_contract():
     profile = client.put(
         "/career/profile",
@@ -153,7 +163,8 @@ def test_profile_stage_and_leaderboard_contract():
         json=stage_payload("1", "normal", list(STAGE_COUNTRY_CODES[1])[:10], 35),
     )
     assert completed.status_code == 200
-    assert completed.json()["stage_best"]["score"] == 96
+    assert completed.json()["stage_best"]["score"] == completed.json()["score"]
+    assert completed.json()["base_score"] == 87
     assert completed.json()["stage_best"]["hints_used"] == 1
     assert completed.json()["stage_best"]["mistakes"] == 1
 
@@ -171,7 +182,7 @@ def test_profile_stage_and_leaderboard_contract():
         "region": "Americas",
         "difficulty": "normal",
         "stages_completed": 1,
-        "total_score": 96,
+        "total_score": completed.json()["score"],
         "total_hints_used": 1,
         "total_mistakes": 1,
     }
@@ -190,8 +201,8 @@ def test_difficulties_are_ranked_separately():
 
     normal_board = client.get("/career/leaderboard?difficulty=normal").json()
     easy_board = client.get("/career/leaderboard?difficulty=easy").json()
-    assert normal_board["items"][0]["total_score"] == 96
-    assert easy_board["items"][0]["total_score"] == 77
+    assert normal_board["items"][0]["total_score"] == normal.json()["score"]
+    assert easy_board["items"][0]["total_score"] == easy.json()["score"]
     assert normal_board["items"][0]["difficulty"] == "normal"
     assert easy_board["items"][0]["difficulty"] == "easy"
 
@@ -238,7 +249,7 @@ def test_ranked_progression_cannot_skip_route_positions():
             "difficulty": "easy",
             "country_codes": list(STAGE_COUNTRY_CODES[2])[:8],
             "season_id": "season-1",
-            "ruleset_version": 2,
+            "ruleset_version": 3,
             "content_version": 1,
         },
     )
@@ -260,6 +271,38 @@ def test_failed_run_is_audited_but_never_counted_as_completed():
         run = db.query(StageRun).one()
         assert run.passed is False
         assert run.correct_answers == 6
+
+
+def test_only_a_fully_resolved_stage_is_ranked():
+    codes = list(STAGE_COUNTRY_CODES[1])[:10]
+    response = client.post(
+        "/career/stages/1/complete",
+        json=stage_payload("1", "normal", codes, 35, correct_count=9),
+    )
+    assert response.status_code == 200
+    assert response.json()["correct_answers"] == 9
+    assert response.json()["ranked"] is False
+    assert response.json()["stage_best"] is None
+
+
+def test_history_returns_ranked_and_incomplete_attempts():
+    codes = list(STAGE_COUNTRY_CODES[1])[:10]
+    failed = client.post(
+        "/career/stages/1/complete",
+        json=stage_payload("1", "normal", codes, 35, correct_count=9),
+    )
+    passed = client.post(
+        "/career/stages/1/complete",
+        json=stage_payload("1", "normal", codes, 35),
+    )
+    assert failed.status_code == passed.status_code == 200
+
+    response = client.get("/career/me/history?difficulty=normal&limit=10")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 2
+    assert [item["passed"] for item in payload["items"]] == [True, False]
+    assert all(item["flags_total"] == 10 for item in payload["items"])
 
 
 def test_attempt_is_single_use_and_client_time_is_not_authoritative():
