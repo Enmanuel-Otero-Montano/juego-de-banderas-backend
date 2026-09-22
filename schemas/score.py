@@ -132,3 +132,25 @@ class CareerMeStatsResponse(BaseModel):
     max_score: int
     last_played: Optional[LastPlayed] = None
     leaderboard_rank: Optional[int] = None
+
+
+class CareerRunHistoryEntry(BaseModel):
+    stage_run_id: int
+    attempt_id: Optional[str] = None
+    stage_id: str
+    route_position: Optional[int] = None
+    difficulty: Literal['easy', 'normal', 'hard']
+    correct_answers: int
+    flags_total: int
+    score: int
+    mistakes: int
+    hints_used: int
+    time_seconds: int
+    passed: bool
+    played_at: datetime
+
+
+class CareerRunHistoryResponse(BaseModel):
+    items: list[CareerRunHistoryEntry]
+    total: int
+    season_id: str

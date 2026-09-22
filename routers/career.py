@@ -23,6 +23,7 @@ from schemas.score import (
     CareerStatsResponse,
     CareerLeaderboardResponse,
     CareerMeStatsResponse,
+    CareerRunHistoryResponse,
     RankingProfileUpdate,
     RankingProfileResponse,
 )
@@ -272,18 +273,10 @@ async def complete_stage(
     elapsed_seconds = max(0, ceil((now - attempt.started_at).total_seconds()))
     stage_data.time_seconds = min(elapsed_seconds, get_difficulty_config(stage_data.difficulty)['time_limit'])
 
-    from utils.career_scoring import compute_stage_score
-    computed_score = compute_stage_score(
-        stage_id,
-        stage_data.groups,
-        stage_data.hints_used,
-        stage_data.time_seconds,
-        answers=answer_payload,
-        difficulty=stage_data.difficulty,
-    )
-    if stage_data.answers:
-        from utils.career_scoring import calculate_score
-        stage_data.hints_used = calculate_score(answer_payload, stage_data.time_seconds, stage_data.difficulty)['hints_used']
+    from utils.career_scoring import calculate_score
+    score_breakdown = calculate_score(answer_payload, stage_data.time_seconds, stage_data.difficulty)
+    computed_score = score_breakdown['score']
+    stage_data.hints_used = score_breakdown['hints_used']
 
     # El servidor es autoritario: sobreescribimos el score del request
     stage_data.score = computed_score
@@ -314,6 +307,12 @@ async def complete_stage(
             "stage_run_id": run.id,
             "ranked": passed,
             "correct_answers": correct_answers,
+            "score": computed_score,
+            "base_score": score_breakdown['base_score'],
+            "time_bonus": score_breakdown['time_bonus'],
+            "clean_bonus": score_breakdown['clean_bonus'],
+            "hints_used": score_breakdown['hints_used'],
+            "mistakes": score_breakdown['mistakes'],
             "stage_best_updated": is_better,
             "stage_best": {
                 "score": best.score,
@@ -415,6 +414,18 @@ async def get_my_career_stats_screen(
     """
     from repository import career_repo
     return career_repo.get_me_stats(db, current_user.id, CURRENT_SEASON_ID, difficulty)
+
+
+@router.get("/me/history", response_model=CareerRunHistoryResponse)
+async def get_my_career_history(
+    current_user: Annotated[user_schema.User, Depends(get_current_active_user)],
+    db: Annotated[Session, Depends(get_db)],
+    difficulty: Literal['easy', 'normal', 'hard'] = 'normal',
+    limit: int = Query(default=50, ge=1, le=100),
+):
+    """Historial cronológico de intentos de Viaje para la evolución personal."""
+    from repository import career_repo
+    return career_repo.get_run_history(db, current_user.id, CURRENT_SEASON_ID, difficulty, limit)
 
 
 @router.get("/leaderboard", response_model=CareerLeaderboardResponse)
