@@ -1,7 +1,7 @@
 from typing import Annotated, Optional
 from datetime import timedelta, datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Depends, status, Body, Form, UploadFile, File, Query, Request, Cookie
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Depends, status, Body, Form, UploadFile, File, Query, Request, Cookie
 
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from fastapi.responses import RedirectResponse, Response, JSONResponse
@@ -189,6 +189,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
 ALGORITHM = settings.ALGORITHM
 SMTP_SERVER = settings.SMTP_SERVER
 SMTP_PORT = settings.SMTP_PORT
+SMTP_TIMEOUT_SECONDS = settings.SMTP_TIMEOUT_SECONDS
 SENDER_EMAIL = settings.SENDER_EMAIL
 SENDER_PASSWORD = settings.SENDER_PASSWORD.get_secret_value() if settings.SENDER_PASSWORD else None
 VERIFICATION_LINK = settings.VERIFICATION_LINK
@@ -251,6 +252,7 @@ def get_db():
 @limiter.limit("5/hour")  # Máximo 5 registros por hora por IP
 async def register_user(
     request: Request,
+    background_tasks: BackgroundTasks,
     username: Annotated[str, Form(min_length=3, max_length=24)],
     email: Annotated[EmailStr, Form()],
     password: Annotated[str, Form(min_length=8, max_length=128)],
@@ -293,7 +295,7 @@ async def register_user(
     # fallar por eso. En producción se envía la verificación normalmente.
     if SMTP_SERVER and SMTP_PORT and SENDER_EMAIL and SENDER_PASSWORD and VERIFICATION_LINK:
         verification_token = create_email_verification_token(email)
-        send_verification_email(email, verification_token, name)
+        background_tasks.add_task(send_verification_email, email, verification_token, name)
     else:
         logger.warning("Registro creado sin correo de verificación: SMTP no configurado")
     return new_user
@@ -339,7 +341,7 @@ def send_verification_email(email: str, token: str, name: str):
     msg["To"] = email
 
     try:
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
+        with smtplib.SMTP(smtp_server, smtp_port, timeout=SMTP_TIMEOUT_SECONDS) as server:
             server.starttls()
             server.login(sender_email, sender_password)
             server.sendmail(sender_email, email, msg.as_string())
@@ -373,6 +375,7 @@ def verify_email(token: str, db: Session = Depends(get_db)):
 @limiter.limit("3/hour")  # Máximo 3 reenvíos por hora por IP
 def resend_verification_email(
     request: Request,
+    background_tasks: BackgroundTasks,
     email: Annotated[EmailStr, Body()],
     db: Session = Depends(get_db)
 ):
@@ -382,7 +385,7 @@ def resend_verification_email(
         if SMTP_SERVER and SMTP_PORT and SENDER_EMAIL and SENDER_PASSWORD and VERIFICATION_LINK:
             verification_token = create_email_verification_token(user.email)
             name = user.full_name if user.full_name else user.username
-            send_verification_email(user.email, verification_token, name)
+            background_tasks.add_task(send_verification_email, user.email, verification_token, name)
         else:
             logger.warning("No se reenvió la verificación: SMTP no configurado")
 

@@ -28,6 +28,7 @@ class Settings(BaseSettings):
 
     SMTP_SERVER: str | None = None
     SMTP_PORT: int | None = None
+    SMTP_TIMEOUT_SECONDS: float = Field(default=10, gt=0, le=60)
     SENDER_EMAIL: str | None = None
     SENDER_PASSWORD: SecretStr | None = None
 
