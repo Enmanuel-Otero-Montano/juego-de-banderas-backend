@@ -15,13 +15,14 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from db.database import Base
-from db.models import CareerAttempt, StageRun, User
+from db.models import CareerAttempt, CareerSeasonProfile, StageBest, StageRun, User
 from dependencies import get_current_active_user, get_db
 from routers.career import router
 from routers.users import user_router
 from schemas.daily_challenge_schema import GuessRequest
 from utils.career_scoring import calculate_score
 from utils.career_rules import STAGE_COUNTRY_CODES
+from utils.country_regions import COUNTRY_REGION
 import main as backend_main
 
 
@@ -155,10 +156,12 @@ def test_incomplete_stage_does_not_receive_completion_bonuses():
 def test_profile_stage_and_leaderboard_contract():
     profile = client.put(
         "/career/profile",
-        json={"display_name": "Capitana Atlas", "country": "uy", "region": "Americas"},
+        json={"display_name": "Capitana Atlas", "country": "uy"},
     )
     assert profile.status_code == 200
     assert profile.json()["ranked_profile_ready"] is True
+    assert profile.json()["country"] == "UY"
+    assert profile.json()["region"] == "Americas"
 
     completed = client.post(
         "/career/stages/1/complete",
@@ -321,10 +324,88 @@ def test_origin_is_locked_after_joining_the_active_season():
     create_attempt(1, "easy", list(STAGE_COUNTRY_CODES[1])[:8])
     response = client.put(
         "/career/profile",
-        json={"country": "BR", "region": "Americas"},
+        json={"country": "BR"},
     )
     assert response.status_code == 409
     assert "locked" in response.json()["detail"]
+
+
+def test_profile_rejects_country_region_mismatch():
+    response = client.put(
+        "/career/profile",
+        json={"country": "UY", "region": "Europe"},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Ranking region does not match country"
+
+
+def test_profile_rejects_unknown_country_code():
+    response = client.put(
+        "/career/profile",
+        json={"country": "ZZ"},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "country must be a supported ISO alpha-2 code"
+
+
+def test_profile_does_not_allow_region_without_country():
+    response = client.put(
+        "/career/profile",
+        json={"region": "Europe"},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Ranking region is derived from country"
+
+
+def test_legacy_matching_region_is_accepted_but_server_remains_authoritative():
+    response = client.put(
+        "/career/profile",
+        json={"country": "es", "region": "Europe"},
+    )
+    assert response.status_code == 200
+    assert response.json()["country"] == "ES"
+    assert response.json()["region"] == "Europe"
+
+
+def test_country_catalog_covers_all_playable_countries():
+    assert len(COUNTRY_REGION) == 195
+    assert COUNTRY_REGION["UY"] == "Americas"
+    assert COUNTRY_REGION["ES"] == "Europe"
+
+
+def test_region_filter_uses_country_as_authority_for_existing_rows():
+    with TestingSessionLocal() as db:
+        db.add(
+            CareerSeasonProfile(
+                user_id=1,
+                season_id="season-1",
+                country="UY",
+                region="Europe",
+            )
+        )
+        db.add(
+            StageBest(
+                user_id=1,
+                stage_id="1",
+                route_position=1,
+                season_id="season-1",
+                ruleset_version=3,
+                content_version=1,
+                score=100,
+                mistakes=0,
+                difficulty="normal",
+                hints_used=0,
+                time_seconds=30,
+            )
+        )
+        db.commit()
+
+    americas = client.get("/career/leaderboard?difficulty=normal&region=Americas").json()
+    europe = client.get("/career/leaderboard?difficulty=normal&region=Europe").json()
+
+    assert americas["total"] == 1
+    assert americas["items"][0]["region"] == "Americas"
+    assert europe["total"] == 0
 
 
 def test_account_deletion_removes_profile_and_ranked_results():

@@ -39,6 +39,7 @@ from utils.career_rules import (
     validate_country_codes,
     validate_stage_identity,
 )
+from utils.country_regions import COUNTRY_REGION, REGION_COUNTRY_CODES, canonical_country_region
 
 from datetime import timedelta
 from math import ceil
@@ -87,8 +88,20 @@ async def update_ranking_profile(
         CareerSeasonProfile.user_id == current_user.id,
         CareerSeasonProfile.season_id == CURRENT_SEASON_ID,
     ).first()
-    requested_country = profile.country.upper() if profile.country is not None else user.country
-    requested_region = profile.region if profile.region is not None else user.ranking_region
+    requested_country = user.country
+    requested_region = user.ranking_region
+    if profile.region is not None and profile.country is None:
+        raise HTTPException(status_code=422, detail="Ranking region is derived from country")
+    if profile.country is not None:
+        try:
+            requested_country, requested_region = canonical_country_region(profile.country)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if profile.region is not None and profile.region != requested_region:
+            raise HTTPException(
+                status_code=422,
+                detail="Ranking region does not match country",
+            )
     if season_profile and (
         requested_country != season_profile.country or requested_region != season_profile.region
     ):
@@ -101,9 +114,8 @@ async def update_ranking_profile(
         alias = profile.display_name.strip()
         user.ranking_alias = alias or None
     if profile.country is not None:
-        user.country = profile.country.upper()
-    if profile.region is not None:
-        user.ranking_region = profile.region
+        user.country = requested_country
+        user.ranking_region = requested_region
 
     db.commit()
     db.refresh(user)
@@ -493,9 +505,11 @@ async def get_career_leaderboard(
     )
 
     if country:
-        query = query.filter(CareerSeasonProfile.country == country.upper())
+        query = query.filter(func.upper(CareerSeasonProfile.country) == country.upper())
     if region:
-        query = query.filter(CareerSeasonProfile.region == region)
+        query = query.filter(
+            func.upper(CareerSeasonProfile.country).in_(REGION_COUNTRY_CODES[region])
+        )
 
     # Get total count for the filtered query
     total = db.query(func.count(scoped_stats.c.user_id)).select_from(scoped_stats).join(
@@ -504,9 +518,11 @@ async def get_career_leaderboard(
         & (CareerSeasonProfile.season_id == CURRENT_SEASON_ID),
     )
     if country:
-        total = total.filter(CareerSeasonProfile.country == country.upper())
+        total = total.filter(func.upper(CareerSeasonProfile.country) == country.upper())
     if region:
-        total = total.filter(CareerSeasonProfile.region == region)
+        total = total.filter(
+            func.upper(CareerSeasonProfile.country).in_(REGION_COUNTRY_CODES[region])
+        )
     total_count = total.scalar()
 
     results = query.order_by(
@@ -520,8 +536,8 @@ async def get_career_leaderboard(
                 "user_id": r[1],
                 "username": r[2],
                 "display_name": r[3] or r[2],
-                "country": r[4],
-                "region": r[5],
+                "country": r[4].upper(),
+                "region": COUNTRY_REGION.get(r[4].upper(), r[5]),
                 "difficulty": difficulty,
                 "avatar_url": f"/user/{r[1]}/profile_image",
                 "stages_completed": r[6],

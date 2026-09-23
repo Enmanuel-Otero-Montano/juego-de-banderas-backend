@@ -110,7 +110,9 @@ class RankingProfileUpdate(BaseModel):
     """Datos voluntarios y públicos que se muestran en el ranking."""
     # Una cadena vacía permite volver al nombre de usuario por defecto.
     display_name: Optional[str] = Field(default=None, max_length=24)
-    country: Optional[str] = Field(default=None, min_length=2, max_length=3)
+    country: Optional[str] = Field(default=None, min_length=2, max_length=2)
+    # Compatibilidad temporal: clientes anteriores enviaban también la región.
+    # El servidor la deriva siempre del país y sólo acepta una coincidencia.
     region: Optional[Literal['Americas', 'Europe', 'Asia', 'Africa', 'Oceania']] = None
 
 
