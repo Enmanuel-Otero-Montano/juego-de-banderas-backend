@@ -96,39 +96,42 @@ def answers(codes: list[str], correct_count: int | None = None):
     ]
 
 
-def create_attempt(stage_id: int, difficulty: str, codes: list[str], route_position: int | None = None):
+def create_attempt(stage_id: int, difficulty: str, route_position: int | None = None) -> dict:
     response = client.post(
         "/career/attempts",
         json={
             "route_position": route_position or stage_id,
             "content_stage_id": stage_id,
             "difficulty": difficulty,
-            "country_codes": codes,
             "season_id": "season-1",
-            "ruleset_version": 3,
+            "ruleset_version": 4,
             "content_version": 1,
             "app_version": "1.0.0-test",
         },
     )
     assert response.status_code == 201, response.text
-    return response.json()["attempt_id"]
+    return response.json()
 
 
-def stage_payload(stage_id: str, difficulty: str, codes: list[str], time_seconds: int, correct_count: int | None = None):
-    attempt_id = create_attempt(int(stage_id), difficulty, codes)
-    return {
-        "attempt_id": attempt_id,
-        "stage_id": stage_id,
-        "route_position": int(stage_id),
-        "season_id": "season-1",
-        "ruleset_version": 3,
-        "content_version": 1,
-        "game_mode": "career",
-        "difficulty": difficulty,
-        "time_seconds": time_seconds,
-        "score": 9999,
-        "answers": answers(codes, correct_count),
-    }
+def record_selection(attempt: dict, sequence: int, country_code: str, selected_code: str, event_id: str | None = None):
+    return client.post(
+        f"/career/attempts/{attempt['attempt_id']}/events",
+        json={
+            "event_id": event_id or f"event-{sequence:012d}-test",
+            "sequence": sequence,
+            "country_code": country_code,
+            "selected_code": selected_code,
+        },
+    )
+
+
+def complete_attempt(attempt: dict, correct_count: int | None = None):
+    codes = attempt["country_codes"]
+    correct_count = len(codes) if correct_count is None else correct_count
+    for index, code in enumerate(codes[:correct_count], start=1):
+        response = record_selection(attempt, index, code, code)
+        assert response.status_code == 201, response.text
+    return client.post(f"/career/attempts/{attempt['attempt_id']}/complete", json={"score": 9999, "time_seconds": 0})
 
 
 def test_scoring_is_authoritative_and_explainable():
@@ -163,15 +166,12 @@ def test_profile_stage_and_leaderboard_contract():
     assert profile.json()["country"] == "UY"
     assert profile.json()["region"] == "Americas"
 
-    completed = client.post(
-        "/career/stages/1/complete",
-        json=stage_payload("1", "normal", list(STAGE_COUNTRY_CODES[1])[:10], 35),
-    )
+    completed = complete_attempt(create_attempt(1, "normal"))
     assert completed.status_code == 200
     assert completed.json()["stage_best"]["score"] == completed.json()["score"]
-    assert completed.json()["base_score"] == 87
-    assert completed.json()["stage_best"]["hints_used"] == 1
-    assert completed.json()["stage_best"]["mistakes"] == 1
+    assert completed.json()["base_score"] == 100
+    assert completed.json()["stage_best"]["hints_used"] == 0
+    assert completed.json()["stage_best"]["mistakes"] == 0
 
     leaderboard = client.get("/career/leaderboard?difficulty=normal")
     assert leaderboard.status_code == 200
@@ -188,20 +188,14 @@ def test_profile_stage_and_leaderboard_contract():
         "difficulty": "normal",
         "stages_completed": 1,
         "total_score": completed.json()["score"],
-        "total_hints_used": 1,
-        "total_mistakes": 1,
+        "total_hints_used": 0,
+        "total_mistakes": 0,
     }
 
 
 def test_difficulties_are_ranked_separately():
-    normal = client.post(
-        "/career/stages/1/complete",
-        json=stage_payload("1", "normal", list(STAGE_COUNTRY_CODES[1])[:10], 35),
-    )
-    easy = client.post(
-        "/career/stages/1/complete",
-        json=stage_payload("1", "easy", list(STAGE_COUNTRY_CODES[1])[:8], 40),
-    )
+    normal = complete_attempt(create_attempt(1, "normal"))
+    easy = complete_attempt(create_attempt(1, "easy"))
     assert normal.status_code == easy.status_code == 200
 
     normal_board = client.get("/career/leaderboard?difficulty=normal").json()
@@ -212,37 +206,55 @@ def test_difficulties_are_ranked_separately():
     assert easy_board["items"][0]["difficulty"] == "easy"
 
 
-@pytest.mark.parametrize(
-    ("payload", "detail"),
-    [
-        (
-            lambda: stage_payload("1", "normal", list(STAGE_COUNTRY_CODES[1])[:10], 35),
-            "answers do not match the server-issued attempt",
-        ),
-    ],
-)
-def test_invalid_ranked_stage_is_rejected(payload, detail):
-    value = payload()
-    value["answers"][0]["country_code"] = "zz"
-    response = client.post("/career/stages/1/complete", json=value)
+def test_server_chooses_the_plan_and_rejects_a_client_supplied_subset():
+    response = client.post(
+        "/career/attempts",
+        json={
+            "route_position": 1,
+            "content_stage_id": 1,
+            "difficulty": "easy",
+            "country_codes": ["uy"] * 8,
+            "season_id": "season-1",
+            "ruleset_version": 4,
+            "content_version": 1,
+        },
+    )
     assert response.status_code == 422
-    assert response.json()["detail"] == detail
+
+    plan = create_attempt(1, "easy")
+    assert plan["country_codes"] == list(STAGE_COUNTRY_CODES[1])[:8]
 
 
-def test_duplicate_country_codes_are_rejected():
-    payload = stage_payload("1", "normal", list(STAGE_COUNTRY_CODES[1])[:10], 35)
-    payload["answers"][1]["country_code"] = payload["answers"][0]["country_code"]
-    response = client.post("/career/stages/1/complete", json=payload)
-    assert response.status_code == 422
-    assert response.json()["detail"] == "country codes must be unique within a stage"
+def test_events_are_idempotent_sequenced_and_bound_to_the_plan():
+    attempt = create_attempt(1, "easy")
+    first_code = attempt["country_codes"][0]
+    first = record_selection(attempt, 1, first_code, first_code, "event-000000000001-test")
+    duplicate = record_selection(attempt, 1, first_code, first_code, "event-000000000001-test")
+    assert first.status_code == duplicate.status_code == 201
+    assert duplicate.json()["sequence"] == 1
+
+    skipped = record_selection(attempt, 3, attempt["country_codes"][1], attempt["country_codes"][1])
+    assert skipped.status_code == 409
+    assert "next sequence" in skipped.json()["detail"]
+
+    outside = record_selection(attempt, 2, "zz", first_code)
+    assert outside.status_code == 422
+    assert "server-issued plan" in outside.json()["detail"]
 
 
-def test_arbitrary_stage_ids_are_rejected_before_they_can_affect_ranking():
-    payload = stage_payload("1", "normal", list(STAGE_COUNTRY_CODES[1])[:10], 35)
-    payload["stage_id"] = "999"
-    response = client.post("/career/stages/999/complete", json=payload)
-    assert response.status_code == 422
-    assert response.json()["detail"] == "ranked stages must be between 1 and 12"
+def test_finalization_uses_persisted_events_not_a_client_summary():
+    attempt = create_attempt(1, "normal")
+    response = complete_attempt(attempt, correct_count=6)
+    assert response.status_code == 200
+    assert response.json()["correct_answers"] == 6
+    assert response.json()["ranked"] is False
+    assert response.json()["stage_best"] is None
+
+
+def test_legacy_final_payload_is_rejected():
+    response = client.post("/career/stages/1/complete", json={})
+    assert response.status_code == 426
+    assert response.json()["detail"] == "Ranking protocol upgrade required"
 
 
 def test_ranked_progression_cannot_skip_route_positions():
@@ -252,9 +264,8 @@ def test_ranked_progression_cannot_skip_route_positions():
             "route_position": 2,
             "content_stage_id": 2,
             "difficulty": "easy",
-            "country_codes": list(STAGE_COUNTRY_CODES[2])[:8],
             "season_id": "season-1",
-            "ruleset_version": 3,
+            "ruleset_version": 4,
             "content_version": 1,
         },
     )
@@ -263,11 +274,7 @@ def test_ranked_progression_cannot_skip_route_positions():
 
 
 def test_failed_run_is_audited_but_never_counted_as_completed():
-    codes = list(STAGE_COUNTRY_CODES[1])[:10]
-    response = client.post(
-        "/career/stages/1/complete",
-        json=stage_payload("1", "normal", codes, 35, correct_count=6),
-    )
+    response = complete_attempt(create_attempt(1, "normal"), correct_count=6)
     assert response.status_code == 200
     assert response.json()["ranked"] is False
     assert response.json()["stage_best"] is None
@@ -279,11 +286,7 @@ def test_failed_run_is_audited_but_never_counted_as_completed():
 
 
 def test_only_a_fully_resolved_stage_is_ranked():
-    codes = list(STAGE_COUNTRY_CODES[1])[:10]
-    response = client.post(
-        "/career/stages/1/complete",
-        json=stage_payload("1", "normal", codes, 35, correct_count=9),
-    )
+    response = complete_attempt(create_attempt(1, "normal"), correct_count=9)
     assert response.status_code == 200
     assert response.json()["correct_answers"] == 9
     assert response.json()["ranked"] is False
@@ -291,15 +294,8 @@ def test_only_a_fully_resolved_stage_is_ranked():
 
 
 def test_history_returns_ranked_and_incomplete_attempts():
-    codes = list(STAGE_COUNTRY_CODES[1])[:10]
-    failed = client.post(
-        "/career/stages/1/complete",
-        json=stage_payload("1", "normal", codes, 35, correct_count=9),
-    )
-    passed = client.post(
-        "/career/stages/1/complete",
-        json=stage_payload("1", "normal", codes, 35),
-    )
+    failed = complete_attempt(create_attempt(1, "normal"), correct_count=9)
+    passed = complete_attempt(create_attempt(1, "normal"))
     assert failed.status_code == passed.status_code == 200
 
     response = client.get("/career/me/history?difficulty=normal&limit=10")
@@ -310,18 +306,18 @@ def test_history_returns_ranked_and_incomplete_attempts():
     assert all(item["flags_total"] == 10 for item in payload["items"])
 
 
-def test_attempt_is_single_use_and_client_time_is_not_authoritative():
-    payload = stage_payload("1", "normal", list(STAGE_COUNTRY_CODES[1])[:10], 9999)
-    first = client.post("/career/stages/1/complete", json=payload)
-    second = client.post("/career/stages/1/complete", json=payload)
+def test_completion_is_idempotent_and_server_time_is_authoritative():
+    attempt = create_attempt(1, "normal")
+    first = complete_attempt(attempt)
+    second = client.post(f"/career/attempts/{attempt['attempt_id']}/complete")
     assert first.status_code == 200
-    assert first.json()["stage_best"]["time_seconds"] <= 1
-    assert second.status_code == 409
-    assert second.json()["detail"] == "Ranked attempt was already completed"
+    assert first.json()["stage_best"]["time_seconds"] <= 95
+    assert second.status_code == 200
+    assert second.json()["stage_run_id"] == first.json()["stage_run_id"]
 
 
 def test_origin_is_locked_after_joining_the_active_season():
-    create_attempt(1, "easy", list(STAGE_COUNTRY_CODES[1])[:8])
+    create_attempt(1, "easy")
     response = client.put(
         "/career/profile",
         json={"country": "BR"},
@@ -389,7 +385,7 @@ def test_region_filter_uses_country_as_authority_for_existing_rows():
                 stage_id="1",
                 route_position=1,
                 season_id="season-1",
-                ruleset_version=3,
+                ruleset_version=4,
                 content_version=1,
                 score=100,
                 mistakes=0,
@@ -409,10 +405,7 @@ def test_region_filter_uses_country_as_authority_for_existing_rows():
 
 
 def test_account_deletion_removes_profile_and_ranked_results():
-    completed = client.post(
-        "/career/stages/1/complete",
-        json=stage_payload("1", "normal", list(STAGE_COUNTRY_CODES[1])[:10], 35),
-    )
+    completed = complete_attempt(create_attempt(1, "normal"))
     assert completed.status_code == 200
 
     deleted = client.delete("/users/me")

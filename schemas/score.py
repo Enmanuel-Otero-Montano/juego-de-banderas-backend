@@ -34,7 +34,6 @@ class CareerAttemptCreate(BaseModel):
     route_position: int = Field(ge=1, le=12)
     content_stage_id: int = Field(ge=1, le=12)
     difficulty: Literal['easy', 'normal', 'hard']
-    country_codes: list[str] = Field(min_length=1, max_length=12)
     season_id: str
     ruleset_version: int
     content_version: int
@@ -43,13 +42,38 @@ class CareerAttemptCreate(BaseModel):
 
 class CareerAttemptResponse(BaseModel):
     attempt_id: str
+    country_codes: list[str]
     season_id: str
     ruleset_version: int
     content_version: int
     expires_at: datetime
 
+class RankedSelectionEvent(BaseModel):
+    """Una selección hecha durante una partida clasificatoria.
+
+    Los IDs y la secuencia permiten reintentos seguros cuando la red duplica
+    una petición. El servidor asigna el timestamp y deriva el resultado.
+    """
+    model_config = ConfigDict(extra='forbid')
+
+    event_id: str = Field(min_length=16, max_length=64, pattern=r'^[A-Za-z0-9_-]+$')
+    sequence: int = Field(ge=1, le=100)
+    country_code: str = Field(min_length=2, max_length=2, pattern=r'^[A-Za-z]{2}$')
+    selected_code: str = Field(min_length=2, max_length=2, pattern=r'^[A-Za-z]{2}$')
+
+
+class RankedEventResponse(BaseModel):
+    event_id: str
+    sequence: int
+    accepted_at: datetime
+
+
 class StageCompleteRequest(BaseModel):
-    """Request para completar una etapa en modo carrera."""
+    """Contrato legado de finalización.
+
+    Se mantiene sólo para producir un error explícito a clientes antiguos;
+    el protocolo vigente termina un intento ya registrado en el servidor.
+    """
     model_config = ConfigDict(extra='forbid')
 
     attempt_id: str = Field(min_length=32, max_length=64)

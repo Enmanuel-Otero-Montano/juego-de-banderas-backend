@@ -162,6 +162,29 @@ class CareerAttempt(database.Base):
     user = relationship("User", back_populates="career_attempts")
 
 
+class CareerAttemptEvent(database.Base):
+    """Evento inmutable de una partida clasificatoria emitido por el cliente.
+
+    El resultado final se obtiene exclusivamente de estos eventos. `event_id`
+    hace idempotentes los reintentos y `sequence` impide reordenarlos.
+    """
+    __tablename__ = "career_attempt_events"
+
+    id = Column(Integer, primary_key=True)
+    attempt_id = Column(String, ForeignKey("career_attempts.id", ondelete="CASCADE"), nullable=False, index=True)
+    event_id = Column(String, nullable=False)
+    sequence = Column(Integer, nullable=False)
+    country_code = Column(String, nullable=False)
+    selected_code = Column(String, nullable=False)
+    accepted_at = Column(DateTime, default=utc_now, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('attempt_id', 'event_id', name='uq_career_attempt_event_id'),
+        UniqueConstraint('attempt_id', 'sequence', name='uq_career_attempt_event_sequence'),
+        Index('ix_career_attempt_event_attempt_sequence', 'attempt_id', 'sequence'),
+    )
+
+
 class StageBest(database.Base):
     """
     Mejor resultado por usuario y etapa (evitar farming).

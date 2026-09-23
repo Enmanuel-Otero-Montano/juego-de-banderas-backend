@@ -5,10 +5,15 @@ nueva versión/temporada; nunca se reinterpreta una marca histórica.
 """
 
 CURRENT_SEASON_ID = "season-1"
-CURRENT_RULESET_VERSION = 3
+CURRENT_RULESET_VERSION = 4
 CURRENT_CONTENT_VERSION = 1
 MIN_PASS_RATIO = 1.0
 ATTEMPT_TTL_SECONDS = 180
+# La UI deja 750 ms de feedback entre selecciones. Este umbral no pretende
+# probar que haya una persona, pero evita que una ráfaga inmediata de eventos
+# produzca una marca válida y da una señal inequívoca de automatización.
+MIN_RANKED_EVENT_INTERVAL_SECONDS = 0.5
+MIN_RANKED_COMPLETION_SECONDS = 5
 
 RANKED_STAGE_IDS = frozenset(range(1, 13))
 
@@ -35,6 +40,24 @@ def validate_stage_identity(route_position: int, content_stage_id: int) -> None:
         raise ValueError("route position 12 must use the final content stage")
     if route_position < 12 and content_stage_id == 12:
         raise ValueError("the final content stage can only be played at route position 12")
+
+
+def select_ranked_country_codes(content_stage_id: int, difficulty: str, player_country: str | None) -> list[str]:
+    """Devuelve una composición estable elegida por el servidor.
+
+    El cliente nunca aporta el subconjunto. La personalización de origen se
+    conserva para la primera etapa y no permite alterar cantidad ni orden.
+    """
+    from utils.career_scoring import get_difficulty_config
+
+    codes = list(STAGE_COUNTRY_CODES[content_stage_id])
+    if player_country and content_stage_id in RANKED_STAGE_IDS:
+        player_code = player_country.lower()
+        # La primera etapa de la ruta es la de origen. Sustituimos sólo la
+        # última bandera para que la cantidad siga siendo canónica.
+        if player_code not in codes:
+            codes[-1] = player_code
+    return codes[:get_difficulty_config(difficulty)['flags_total']]
 
 
 def validate_country_codes(content_stage_id: int, country_codes: list[str], player_country: str | None) -> list[str]:

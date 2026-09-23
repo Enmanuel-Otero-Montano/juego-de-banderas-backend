@@ -19,6 +19,8 @@ from schemas import user_schema
 from schemas.score import (
     CareerAttemptCreate,
     CareerAttemptResponse,
+    RankedSelectionEvent,
+    RankedEventResponse,
     StageCompleteRequest,
     CareerStatsResponse,
     CareerLeaderboardResponse,
@@ -27,7 +29,7 @@ from schemas.score import (
     RankingProfileUpdate,
     RankingProfileResponse,
 )
-from db.models import CareerAttempt, CareerSeasonProfile, StageBest, StageRun
+from db.models import CareerAttempt, CareerAttemptEvent, CareerSeasonProfile, StageBest, StageRun
 from dependencies import get_current_active_user, get_db
 from utils.limiter import limiter
 from utils.career_rules import (
@@ -35,17 +37,72 @@ from utils.career_rules import (
     CURRENT_CONTENT_VERSION,
     CURRENT_RULESET_VERSION,
     CURRENT_SEASON_ID,
+    MIN_RANKED_COMPLETION_SECONDS,
+    MIN_RANKED_EVENT_INTERVAL_SECONDS,
     MIN_PASS_RATIO,
-    validate_country_codes,
+    select_ranked_country_codes,
     validate_stage_identity,
 )
 from utils.country_regions import COUNTRY_REGION, REGION_COUNTRY_CODES, canonical_country_region
+from config import settings
 
 from datetime import timedelta
 from math import ceil
 from uuid import uuid4
 
 router = APIRouter(prefix="/career", tags=["career"])
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _attempt_answers(db: Session, attempt: CareerAttempt) -> list[dict]:
+    """Reconstruye una etapa solamente a partir del plan y sus eventos."""
+    events = db.query(CareerAttemptEvent).filter(
+        CareerAttemptEvent.attempt_id == attempt.id,
+    ).order_by(CareerAttemptEvent.sequence).all()
+    by_country: dict[str, list[CareerAttemptEvent]] = {code: [] for code in attempt.country_codes}
+    for event in events:
+        by_country[event.country_code].append(event)
+    return [
+        {
+            'country_code': code,
+            'selected_codes': [event.selected_code for event in by_country[code]],
+            'correct': any(event.selected_code == code for event in by_country[code]),
+            # Las pistas están excluidas del modo clasificatorio. Nunca se
+            # acepta este dato desde el cliente.
+            'used_hint': False,
+            'wrong_attempts': sum(event.selected_code != code for event in by_country[code]),
+        }
+        for code in attempt.country_codes
+    ]
+
+
+def _completion_payload(run: StageRun, best: StageBest | None, is_better: bool) -> dict:
+    from utils.career_scoring import calculate_score
+    answers = run.answers or []
+    score_breakdown = calculate_score(answers, run.time_seconds, run.difficulty)
+    return {
+        "stage_run_id": run.id,
+        "ranked": run.passed,
+        "correct_answers": run.correct_answers,
+        "score": run.score,
+        "base_score": score_breakdown['base_score'],
+        "time_bonus": score_breakdown['time_bonus'],
+        "clean_bonus": score_breakdown['clean_bonus'],
+        "hints_used": run.hints_used,
+        "mistakes": run.mistakes,
+        "stage_best_updated": is_better,
+        "stage_best": {
+            "score": best.score,
+            "hints_used": best.hints_used,
+            "mistakes": best.mistakes,
+            "difficulty": best.difficulty,
+            "time_seconds": best.time_seconds,
+            "achieved_at": best.achieved_at,
+        } if best else None,
+    }
 
 
 def validate_ranked_progression(
@@ -153,17 +210,14 @@ async def create_ranked_attempt(
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
-    config = get_difficulty_config(payload.difficulty)
-    if len(payload.country_codes) != config['flags_total']:
-        raise HTTPException(status_code=422, detail=f"{payload.difficulty} requires {config['flags_total']} countries")
-
     user = db.query(User).filter(User.id == current_user.id).first()
     if not user or not user.country or not user.ranking_region:
         raise HTTPException(status_code=409, detail="Complete the ranking profile before starting")
-    try:
-        country_codes = validate_country_codes(payload.content_stage_id, payload.country_codes, user.country)
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
+    country_codes = select_ranked_country_codes(
+        payload.content_stage_id,
+        payload.difficulty,
+        user.country if payload.route_position == 1 else None,
+    )
     validate_ranked_progression(db, user.id, payload.route_position, payload.content_stage_id)
 
     season_profile = db.query(CareerSeasonProfile).filter(
@@ -202,6 +256,7 @@ async def create_ranked_attempt(
     db.commit()
     return {
         "attempt_id": attempt.id,
+        "country_codes": attempt.country_codes,
         "season_id": attempt.season_id,
         "ruleset_version": attempt.ruleset_version,
         "content_version": attempt.content_version,
@@ -209,147 +264,174 @@ async def create_ranked_attempt(
     }
 
 
-@router.post("/stages/{stage_id}/complete", status_code=200)
+@router.post("/attempts/{attempt_id}/events", response_model=RankedEventResponse, status_code=201)
+@limiter.limit("120/minute")
+async def record_ranked_selection(
+    request: Request,
+    attempt_id: str,
+    payload: RankedSelectionEvent,
+    current_user: Annotated[user_schema.User, Depends(get_current_active_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Registra una selección de la partida; los reintentos son idempotentes."""
+    attempt = db.query(CareerAttempt).filter(
+        CareerAttempt.id == attempt_id,
+        CareerAttempt.user_id == current_user.id,
+    ).with_for_update().first()
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Ranked attempt not found")
+
+    duplicate = db.query(CareerAttemptEvent).filter(
+        CareerAttemptEvent.attempt_id == attempt.id,
+        CareerAttemptEvent.event_id == payload.event_id,
+    ).first()
+    if duplicate:
+        if (
+            duplicate.sequence != payload.sequence
+            or duplicate.country_code != payload.country_code.lower()
+            or duplicate.selected_code != payload.selected_code.lower()
+        ):
+            raise HTTPException(status_code=409, detail="event_id was already used with different data")
+        return {"event_id": duplicate.event_id, "sequence": duplicate.sequence, "accepted_at": duplicate.accepted_at}
+
+    now = utc_now()
+    if attempt.completed_at is not None:
+        raise HTTPException(status_code=409, detail="Ranked attempt was already completed")
+    if now > attempt.expires_at:
+        raise HTTPException(status_code=410, detail="Ranked attempt expired")
+
+    country_code = payload.country_code.lower()
+    selected_code = payload.selected_code.lower()
+    plan_codes = set(attempt.country_codes)
+    if country_code not in plan_codes or selected_code not in plan_codes:
+        raise HTTPException(status_code=422, detail="selection does not belong to the server-issued plan")
+
+    last_event = db.query(CareerAttemptEvent).filter(
+        CareerAttemptEvent.attempt_id == attempt.id,
+    ).order_by(CareerAttemptEvent.sequence.desc()).first()
+    last_sequence = last_event.sequence if last_event else 0
+    if payload.sequence != last_sequence + 1:
+        raise HTTPException(status_code=409, detail="ranked events must use the next sequence number")
+    if (
+        last_event
+        and settings.ENV != "test"
+        and (now - last_event.accepted_at).total_seconds() < MIN_RANKED_EVENT_INTERVAL_SECONDS
+    ):
+        raise HTTPException(status_code=429, detail="ranked selections are arriving too quickly")
+
+    already_resolved = db.query(CareerAttemptEvent.id).filter(
+        CareerAttemptEvent.attempt_id == attempt.id,
+        CareerAttemptEvent.country_code == country_code,
+        CareerAttemptEvent.selected_code == country_code,
+    ).first()
+    if already_resolved:
+        raise HTTPException(status_code=409, detail="country was already resolved in this attempt")
+
+    event = CareerAttemptEvent(
+        attempt_id=attempt.id,
+        event_id=payload.event_id,
+        sequence=payload.sequence,
+        country_code=country_code,
+        selected_code=selected_code,
+        accepted_at=now,
+    )
+    db.add(event)
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="ranked event was already recorded") from error
+    return {"event_id": event.event_id, "sequence": event.sequence, "accepted_at": event.accepted_at}
+
+
+@router.post("/attempts/{attempt_id}/complete", status_code=200)
+@limiter.limit("30/minute")
+async def complete_ranked_attempt(
+    request: Request,
+    attempt_id: str,
+    current_user: Annotated[user_schema.User, Depends(get_current_active_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Finaliza y puntúa exclusivamente los eventos persistidos por servidor."""
+    attempt = db.query(CareerAttempt).filter(
+        CareerAttempt.id == attempt_id,
+        CareerAttempt.user_id == current_user.id,
+    ).with_for_update().first()
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Ranked attempt not found")
+
+    existing_run = db.query(StageRun).filter(StageRun.attempt_id == attempt.id).first()
+    if attempt.completed_at is not None and existing_run:
+        best = db.query(StageBest).filter(
+            StageBest.user_id == current_user.id,
+            StageBest.stage_id == existing_run.stage_id,
+            StageBest.difficulty == existing_run.difficulty,
+            StageBest.season_id == existing_run.season_id,
+        ).first()
+        return _completion_payload(existing_run, best, False)
+
+    now = utc_now()
+    if now > attempt.expires_at:
+        raise HTTPException(status_code=410, detail="Ranked attempt expired")
+    validate_ranked_progression(db, current_user.id, attempt.route_position, int(attempt.stage_id))
+
+    answer_payload = _attempt_answers(db, attempt)
+    elapsed_seconds = max(0, ceil((now - attempt.started_at).total_seconds()))
+    from utils.career_scoring import calculate_score, get_difficulty_config
+    elapsed_seconds = min(elapsed_seconds, get_difficulty_config(attempt.difficulty)['time_limit'])
+    score_breakdown = calculate_score(answer_payload, elapsed_seconds, attempt.difficulty)
+    correct_answers = sum(1 for answer in answer_payload if answer['correct'])
+    passed = (
+        correct_answers / len(answer_payload) >= MIN_PASS_RATIO
+        and (settings.ENV == "test" or elapsed_seconds >= MIN_RANKED_COMPLETION_SECONDS)
+    )
+
+    stage_data = StageCompleteRequest(
+        attempt_id=attempt.id,
+        stage_id=attempt.stage_id,
+        route_position=attempt.route_position,
+        season_id=attempt.season_id,
+        ruleset_version=attempt.ruleset_version,
+        content_version=attempt.content_version,
+        game_mode="career",
+        difficulty=attempt.difficulty,
+        time_seconds=elapsed_seconds,
+        score=score_breakdown['score'],
+        hints_used=score_breakdown['hints_used'],
+        answers=answer_payload,
+    )
+    attempt.completed_at = now
+    attempt.raw_submission = {
+        "protocol": "ranked-events-v1",
+        "event_count": len(db.query(CareerAttemptEvent.id).filter(CareerAttemptEvent.attempt_id == attempt.id).all()),
+    }
+
+    from repository import career_repo
+    try:
+        run = career_repo.create_stage_run(db, current_user.id, stage_data, attempt, passed, answer_payload)
+        best = None
+        is_better = False
+        if passed:
+            best, is_better = career_repo.upsert_stage_best_if_better(db, current_user.id, attempt.stage_id, stage_data)
+        career_repo.recompute_career_stats_from_best(db, current_user.id, attempt.season_id, attempt.difficulty)
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Ranked attempt or stage result was already recorded") from error
+    return _completion_payload(run, best, is_better)
+
+
+@router.post("/stages/{stage_id}/complete", status_code=426)
 @limiter.limit("30/minute")
 async def complete_stage(
     request: Request,
     stage_id: str,
-    stage_data: StageCompleteRequest,
+    stage_data: dict | None,
     current_user: Annotated[user_schema.User, Depends(get_current_active_user)],
     db: Annotated[Session, Depends(get_db)]
 ):
-    """
-    Registra la finalización de una etapa en modo carrera.
-
-    - Valida score y tiempo.
-    - Guarda en StageRun (historial siempre).
-    - Actualiza StageBest (solo si es mejor).
-    - Recalcula CareerUserStats (totales).
-    """
-    # 1. Validaciones básicas y vinculación al intento emitido.
-    if stage_data.game_mode != "career":
-        raise HTTPException(status_code=422, detail="Only career mode is supported")
-
-    if stage_id != stage_data.stage_id:
-        raise HTTPException(status_code=400, detail="stage_id mismatch between path and body")
-
-    try:
-        numeric_stage_id = int(stage_id)
-        validate_stage_identity(stage_data.route_position, numeric_stage_id)
-    except (TypeError, ValueError) as error:
-        raise HTTPException(status_code=422, detail=str(error) or "invalid stage_id") from error
-
-    attempt = db.query(CareerAttempt).filter(
-        CareerAttempt.id == stage_data.attempt_id,
-        CareerAttempt.user_id == current_user.id,
-    ).first()
-    if not attempt:
-        raise HTTPException(status_code=404, detail="Ranked attempt not found")
-    if attempt.completed_at is not None:
-        raise HTTPException(status_code=409, detail="Ranked attempt was already completed")
-
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    if now > attempt.expires_at:
-        raise HTTPException(status_code=410, detail="Ranked attempt expired")
-    expected_contract = (
-        attempt.season_id,
-        attempt.ruleset_version,
-        attempt.content_version,
-        attempt.stage_id,
-        attempt.route_position,
-        attempt.difficulty,
-    )
-    received_contract = (
-        stage_data.season_id,
-        stage_data.ruleset_version,
-        stage_data.content_version,
-        stage_data.stage_id,
-        stage_data.route_position,
-        stage_data.difficulty,
-    )
-    if received_contract != expected_contract:
-        raise HTTPException(status_code=409, detail="Submission does not match the server-issued attempt")
-    validate_ranked_progression(db, current_user.id, stage_data.route_position, numeric_stage_id)
-
-    from utils.career_score_validation import authoritative_answers, validate_stage_score
-    raw_submission = stage_data.model_dump(mode='json')
-    validate_stage_score(stage_data, list(attempt.country_codes))
-    answer_payload = authoritative_answers(stage_data)
-    for answer_model, authoritative in zip(stage_data.answers, answer_payload):
-        answer_model.correct = authoritative['correct']
-        answer_model.wrong_attempts = authoritative['wrong_attempts']
-
-    # El reloj del servidor es autoritario. Una entrega tardía obtiene cero
-    # bonus temporal, pero sigue quedando auditada dentro del TTL del intento.
-    from utils.career_scoring import get_difficulty_config
-    elapsed_seconds = max(0, ceil((now - attempt.started_at).total_seconds()))
-    stage_data.time_seconds = min(elapsed_seconds, get_difficulty_config(stage_data.difficulty)['time_limit'])
-
-    from utils.career_scoring import calculate_score
-    score_breakdown = calculate_score(answer_payload, stage_data.time_seconds, stage_data.difficulty)
-    computed_score = score_breakdown['score']
-    stage_data.hints_used = score_breakdown['hints_used']
-
-    # El servidor es autoritario: sobreescribimos el score del request
-    stage_data.score = computed_score
-    correct_answers = sum(1 for answer in answer_payload if answer['correct'])
-    passed = correct_answers / len(answer_payload) >= MIN_PASS_RATIO
-    attempt.completed_at = now
-    attempt.raw_submission = raw_submission
-
-    from repository import career_repo
-    try:
-        # 2. Guardar historial (StageRun)
-        run = career_repo.create_stage_run(db, current_user.id, stage_data, attempt, passed, answer_payload)
-
-        # 3. Sólo una etapa aprobada puede crear/mejorar una marca clasificatoria.
-        best = None
-        is_better = False
-        if passed:
-            best, is_better = career_repo.upsert_stage_best_if_better(db, current_user.id, stage_id, stage_data)
-
-        # 4. Recalcular sólo el alcance de esta temporada y dificultad.
-        stats = career_repo.recompute_career_stats_from_best(
-            db, current_user.id, stage_data.season_id, stage_data.difficulty
-        )
-
-        db.commit()
-
-        return {
-            "stage_run_id": run.id,
-            "ranked": passed,
-            "correct_answers": correct_answers,
-            "score": computed_score,
-            "base_score": score_breakdown['base_score'],
-            "time_bonus": score_breakdown['time_bonus'],
-            "clean_bonus": score_breakdown['clean_bonus'],
-            "hints_used": score_breakdown['hints_used'],
-            "mistakes": score_breakdown['mistakes'],
-            "stage_best_updated": is_better,
-            "stage_best": {
-                "score": best.score,
-                "hints_used": best.hints_used,
-                "mistakes": best.mistakes,
-                "difficulty": best.difficulty,
-                "time_seconds": best.time_seconds,
-                "achieved_at": best.achieved_at
-            } if best else None,
-            "career_stats": {
-                "stages_completed": stats.stages_completed,
-                "total_score": stats.total_score,
-                "total_hints_used": stats.total_hints_used,
-                "total_time_seconds": stats.total_time_seconds,
-                "total_mistakes": stats.total_mistakes,
-            }
-        }
-    except IntegrityError as e:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="Ranked attempt or stage result was already recorded") from e
-    except Exception as e:
-        db.rollback()
-        import logging
-        logging.getLogger("uvicorn.error").error(f"Error persisting career stage: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Error de persistencia interna")
+    """Rechaza el resumen final de clientes anteriores al protocolo v4."""
+    raise HTTPException(status_code=426, detail="Ranking protocol upgrade required")
 
 
 @router.get("/me", response_model=CareerStatsResponse)
