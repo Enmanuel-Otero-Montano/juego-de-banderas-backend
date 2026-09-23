@@ -35,6 +35,15 @@ class User(database.Base):
     career_season_profiles = relationship("CareerSeasonProfile", back_populates="user", cascade="all, delete")
 
 
+class AuthRateLimit(database.Base):
+    """Ventana compartida de intentos sensibles; la clave nunca contiene PII."""
+    __tablename__ = "auth_rate_limits"
+    key = Column(String(64), primary_key=True)
+    window_started_at = Column(DateTime, nullable=False)
+    attempts = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, nullable=False, default=utc_now, onupdate=utc_now)
+
+
 class DailyChallenge(database.Base):
     __tablename__ = "daily_challenges"
 

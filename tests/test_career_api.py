@@ -22,6 +22,7 @@ from routers.users import user_router
 from schemas.daily_challenge_schema import GuessRequest
 from utils.career_scoring import calculate_score
 from utils.career_rules import STAGE_COUNTRY_CODES
+from utils.auth_rate_limit import consume_auth_attempt
 from utils.country_regions import COUNTRY_REGION
 import main as backend_main
 
@@ -489,3 +490,12 @@ def test_verification_resend_does_not_disclose_account_existence():
     assert known.json() == unknown.json() == {
         "msg": "If the account requires verification, an email was sent"
     }
+
+
+def test_shared_auth_limit_rejects_attempts_over_the_window_limit():
+    with TestingSessionLocal() as db:
+        consume_auth_attempt(db, scope="login", subject="atlas@example.com", client_ip="127.0.0.1", maximum=2, window_seconds=60)
+        consume_auth_attempt(db, scope="login", subject="atlas@example.com", client_ip="127.0.0.1", maximum=2, window_seconds=60)
+        with pytest.raises(backend_main.HTTPException) as error:
+            consume_auth_attempt(db, scope="login", subject="atlas@example.com", client_ip="127.0.0.1", maximum=2, window_seconds=60)
+    assert error.value.status_code == 429

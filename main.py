@@ -16,6 +16,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from slowapi.middleware import SlowAPIMiddleware
 from utils.limiter import limiter
+from utils.auth_rate_limit import consume_auth_attempt
 
 from sqlalchemy.orm import Session
 from config import settings
@@ -263,6 +264,7 @@ async def register_user(
     logger.info("Nueva solicitud de registro")
     username = username.strip()
     email = str(email).strip().lower()
+    consume_auth_attempt(db, scope="register", subject=email, client_ip=request.client.host if request.client else "unknown", maximum=5, window_seconds=3600)
     full_name = full_name.strip() if full_name else None
     if len(username) < 3:
         raise HTTPException(status_code=422, detail="Username must contain at least 3 non-space characters")
@@ -380,6 +382,7 @@ def resend_verification_email(
     db: Session = Depends(get_db)
 ):
     normalized_email = str(email).strip().lower()
+    consume_auth_attempt(db, scope="resend", subject=normalized_email, client_ip=request.client.host if request.client else "unknown", maximum=3, window_seconds=3600)
     user = db.query(models.User).filter(models.User.email == normalized_email).first()
     if user and not user.is_verified:
         if SMTP_SERVER and SMTP_PORT and SENDER_EMAIL and SENDER_PASSWORD and VERIFICATION_LINK:
@@ -477,6 +480,7 @@ async def login_for_access_token(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
     db: Session = Depends(get_db)
 ):
+    consume_auth_attempt(db, scope="login", subject=form_data.username, client_ip=request.client.host if request.client else "unknown", maximum=10, window_seconds=60)
     user = authenticate_user(form_data.username, form_data.password, db)
     if not user:
         logger.warning("Intento de login fallido")
@@ -523,6 +527,7 @@ async def issue_token(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
     db: Session = Depends(get_db)
 ):
+    consume_auth_attempt(db, scope="token", subject=form_data.username, client_ip=request.client.host if request.client else "unknown", maximum=10, window_seconds=60)
     user = authenticate_user(form_data.username, form_data.password, db)
     if not user:
         raise HTTPException(
