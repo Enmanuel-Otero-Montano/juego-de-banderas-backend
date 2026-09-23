@@ -4,7 +4,7 @@ from datetime import timedelta, datetime, timezone
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Depends, status, Body, Form, UploadFile, File, Query, Request, Cookie
 
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
-from fastapi.responses import RedirectResponse, Response, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 
@@ -28,6 +28,9 @@ from pydantic import EmailStr
 
 import smtplib
 from email.mime.text import MIMEText
+from hashlib import sha256
+from hmac import compare_digest
+from urllib.parse import quote
 
 from PIL import Image
 from PIL import UnidentifiedImageError
@@ -310,6 +313,21 @@ def create_email_verification_token(email: str):
     return token
 
 
+def create_password_reset_token(email: str, hashed_password: str) -> str:
+    """Crea un enlace de un solo uso efectivo para recuperar una contraseña.
+
+    La huella de la contraseña actual invalida automáticamente cualquier
+    enlace anterior cuando el usuario completa un restablecimiento.
+    """
+    expire = datetime.now(timezone.utc) + timedelta(hours=1)
+    fingerprint = sha256(hashed_password.encode()).hexdigest()
+    return jwt.encode(
+        {"sub": email, "purpose": "password_reset", "password_fingerprint": fingerprint, "exp": expire},
+        SECRET_KEY,
+        algorithm=ALGORITHM,
+    )
+
+
 def send_verification_email(email: str, token: str, name: str):
     verification_link = f"{VERIFICATION_LINK}{token}"
     subject = "¡Bienvenido a Banderas, países y regiones! Verifica tu cuenta para comenzar"
@@ -349,6 +367,35 @@ def send_verification_email(email: str, token: str, name: str):
             server.sendmail(sender_email, email, msg.as_string())
     except Exception:
         logger.exception("No se pudo enviar el correo de verificación")
+
+
+def send_password_reset_email(email: str, reset_link: str, name: str):
+    subject = "Restablece tu contraseña de Banderas, países y regiones"
+    body = f"""
+    Hola {name},
+
+    Recibimos una solicitud para restablecer la contraseña de tu cuenta.
+
+    Elige una contraseña nueva desde este enlace (válido durante una hora):
+
+    {reset_link}
+
+    Si no solicitaste el cambio, puedes ignorar este correo. Tu contraseña no cambiará.
+
+    Saludos,
+    El equipo de Banderas, países y regiones
+    """
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = SENDER_EMAIL
+    msg["To"] = email
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as server:
+            server.starttls()
+            server.login(SENDER_EMAIL, SENDER_PASSWORD)
+            server.sendmail(SENDER_EMAIL, email, msg.as_string())
+    except Exception:
+        logger.exception("No se pudo enviar el correo de recuperación")
 
 
 @app.get("/verify-email")
@@ -394,6 +441,65 @@ def resend_verification_email(
 
     # Respuesta uniforme para no revelar si el correo tiene una cuenta.
     return {"msg": "If the account requires verification, an email was sent"}
+
+
+@app.post("/password-reset/request")
+@limiter.limit("3/hour")
+def request_password_reset(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    email: Annotated[EmailStr, Body()],
+    db: Session = Depends(get_db),
+):
+    normalized_email = str(email).strip().lower()
+    consume_auth_attempt(db, scope="password_reset", subject=normalized_email, client_ip=get_client_ip(request), maximum=3, window_seconds=3600)
+    user = db.query(models.User).filter(models.User.email == normalized_email).first()
+    if user and SMTP_SERVER and SMTP_PORT and SENDER_EMAIL and SENDER_PASSWORD:
+        token = create_password_reset_token(user.email, user.hashed_password)
+        reset_link = f"{str(request.base_url).rstrip('/')}/reset-password?token={quote(token, safe='')}"
+        name = user.full_name or user.username
+        background_tasks.add_task(send_password_reset_email, user.email, reset_link, name)
+    elif user:
+        logger.warning("No se envió recuperación: SMTP no configurado")
+
+    # La misma respuesta para cuentas existentes e inexistentes evita enumeración.
+    return {"msg": "If the account exists, a password reset email was sent"}
+
+
+@app.post("/password-reset/confirm")
+@limiter.limit("5/hour")
+def confirm_password_reset(
+    request: Request,
+    payload: user_schema.PasswordResetConfirm,
+    db: Session = Depends(get_db),
+):
+    if len(payload.password.encode("utf-8")) > 72:
+        raise HTTPException(status_code=422, detail="Password must be at most 72 bytes")
+    try:
+        claims = jwt.decode(payload.token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=400, detail="Password reset link expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=400, detail="Invalid password reset link")
+
+    email = claims.get("sub")
+    fingerprint = claims.get("password_fingerprint")
+    if claims.get("purpose") != "password_reset" or not isinstance(email, str) or not isinstance(fingerprint, str):
+        raise HTTPException(status_code=400, detail="Invalid password reset link")
+
+    consume_auth_attempt(db, scope="password_reset_confirm", subject=email, client_ip=get_client_ip(request), maximum=5, window_seconds=3600)
+    user = db.query(models.User).filter(models.User.email == email.lower()).first()
+    if not user or not compare_digest(fingerprint, sha256(user.hashed_password.encode()).hexdigest()):
+        raise HTTPException(status_code=400, detail="Password reset link is no longer valid")
+
+    user.hashed_password = get_password_hash(payload.password)
+    db.commit()
+    return {"msg": "Password updated"}
+
+
+@app.get("/reset-password", response_class=HTMLResponse, include_in_schema=False)
+def password_reset_page():
+    return """<!doctype html><html lang=\"es\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Restablecer contraseña</title><style>body{font-family:system-ui;max-width:28rem;margin:8vh auto;padding:1.5rem;color:#172033}label,input,button{display:block;width:100%;box-sizing:border-box}input,button{padding:.8rem;margin:.5rem 0 1rem}button{background:#166534;border:0;border-radius:.5rem;color:white;font-weight:700}#status{min-height:1.5rem}</style><main><h1>Restablecer contraseña</h1><p>Elige una contraseña nueva para tu cuenta.</p><form id=\"reset-form\"><label>Nueva contraseña<input id=\"password\" type=\"password\" minlength=\"8\" maxlength=\"72\" required autocomplete=\"new-password\"></label><button>Guardar contraseña</button></form><p id=\"status\" role=\"status\"></p></main><script>const token=new URLSearchParams(location.search).get('token');const form=document.getElementById('reset-form');const status=document.getElementById('status');if(!token){form.hidden=true;status.textContent='El enlace de recuperación no es válido.'}form.addEventListener('submit',async e=>{e.preventDefault();status.textContent='Guardando…';const response=await fetch('/password-reset/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,password:document.getElementById('password').value})});const result=await response.json().catch(()=>({}));status.textContent=response.ok?'Contraseña actualizada. Ya puedes volver a la app e iniciar sesión.':(result.detail||'No se pudo cambiar la contraseña.');if(response.ok)form.hidden=true})</script></html>"""
 
 
 def verify_password(plain_password, hashed_password):

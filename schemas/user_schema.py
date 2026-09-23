@@ -59,6 +59,11 @@ class ResendEmail(BaseModel):
     email: EmailStr
     model_config = ConfigDict(from_attributes=True)
 
+
+class PasswordResetConfirm(BaseModel):
+    token: str = Field(min_length=1, max_length=4096)
+    password: str = Field(min_length=8, max_length=128)
+
 class UserMeResponse(BaseModel):
     id: int
     email: EmailStr

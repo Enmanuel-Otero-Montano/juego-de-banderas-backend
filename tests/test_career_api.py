@@ -494,6 +494,30 @@ def test_verification_resend_does_not_disclose_account_existence():
     }
 
 
+def test_password_reset_does_not_disclose_account_existence_and_invalidates_used_link():
+    page = registration_client.get("/reset-password")
+    known = registration_client.post("/password-reset/request", json="atlas@example.com")
+    unknown = registration_client.post("/password-reset/request", json="missing@example.com")
+
+    assert page.status_code == 200
+    assert "Restablecer contraseña" in page.text
+    assert known.status_code == unknown.status_code == 200
+    assert known.json() == unknown.json() == {
+        "msg": "If the account exists, a password reset email was sent"
+    }
+
+    with TestingSessionLocal() as db:
+        user = db.query(User).filter(User.email == "atlas@example.com").one()
+        token = backend_main.create_password_reset_token(user.email, user.hashed_password)
+
+    changed = registration_client.post("/password-reset/confirm", json={"token": token, "password": "new-secure-password"})
+    reused = registration_client.post("/password-reset/confirm", json={"token": token, "password": "another-password"})
+
+    assert changed.status_code == 200
+    assert reused.status_code == 400
+    assert registration_client.post("/token", data={"username": "atlas", "password": "new-secure-password"}).status_code == 200
+
+
 def test_shared_auth_limit_rejects_attempts_over_the_window_limit():
     with TestingSessionLocal() as db:
         consume_auth_attempt(db, scope="login", subject="atlas@example.com", client_ip="127.0.0.1", maximum=2, window_seconds=60)
