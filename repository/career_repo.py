@@ -2,7 +2,7 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, timezone
-from db.models import CareerAttempt, CareerUserStats, StageBest, StageRun
+from db.models import CareerAttempt, StageBest, StageRun
 from schemas.score import StageCompleteRequest
 
 
@@ -109,47 +109,6 @@ def upsert_stage_best_if_better(db: Session, user_id: int, stage_id: str, run_da
 
     db.flush()
     return best, is_better
-
-def recompute_career_stats_from_best(db: Session, user_id: int, season_id: str, difficulty: str) -> CareerUserStats:
-    """
-    Recalcula/actualiza CareerUserStats para ranking desde la tabla StageBest.
-    """
-    # Obtener agregados de StageBest para este usuario
-    stats_query = db.query(
-        func.count(StageBest.id).label("stages_completed"),
-        func.sum(StageBest.score).label("total_score"),
-        func.sum(StageBest.hints_used).label("total_hints_used"),
-        func.sum(StageBest.time_seconds).label("total_time_seconds"),
-        func.sum(StageBest.mistakes).label("total_mistakes")
-    ).filter(
-        StageBest.user_id == user_id,
-        StageBest.season_id == season_id,
-        StageBest.difficulty == difficulty,
-    ).first()
-
-    # Obtener la última actividad (el max achieved_at de sus mejores intentos o corridas)
-    # Por consistencia con ranking, usamos el último cambio en un "best"
-    last_activity = db.query(func.max(StageBest.achieved_at)).filter(
-        StageBest.user_id == user_id,
-        StageBest.season_id == season_id,
-        StageBest.difficulty == difficulty,
-    ).scalar()
-
-    stats = db.query(CareerUserStats).filter(CareerUserStats.user_id == user_id).first()
-
-    if not stats:
-        stats = CareerUserStats(user_id=user_id)
-        db.add(stats)
-
-    stats.stages_completed = stats_query.stages_completed or 0
-    stats.total_score = int(stats_query.total_score or 0)
-    stats.total_hints_used = int(stats_query.total_hints_used or 0)
-    stats.total_time_seconds = int(stats_query.total_time_seconds or 0)
-    stats.total_mistakes = int(stats_query.total_mistakes or 0)
-    stats.last_activity_at = last_activity or utc_now()
-
-    db.flush()
-    return stats
 
 def get_me_stats(db: Session, user_id: int, season_id: str, difficulty: str) -> dict:
     """

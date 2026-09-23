@@ -413,7 +413,6 @@ async def complete_ranked_attempt(
         is_better = False
         if passed:
             best, is_better = career_repo.upsert_stage_best_if_better(db, current_user.id, attempt.stage_id, stage_data)
-        career_repo.recompute_career_stats_from_best(db, current_user.id, attempt.season_id, attempt.difficulty)
         db.commit()
     except IntegrityError as error:
         db.rollback()

@@ -28,7 +28,6 @@ class User(database.Base):
     onboarding_completed = Column(Boolean, default=False, nullable=False)
     
     # Career mode relationships
-    career_stats = relationship("CareerUserStats", back_populates="user", uselist=False, cascade="all, delete")
     stage_bests = relationship("StageBest", back_populates="user", cascade="all, delete")
     stage_runs = relationship("StageRun", back_populates="user", cascade="all, delete")
     career_attempts = relationship("CareerAttempt", back_populates="user", cascade="all, delete")
@@ -102,35 +101,6 @@ class DailyGuess(database.Base):
 # Modo por regiones NO persiste puntaje ni estadísticas aquí.
 # overall_score_table (legacy) queda intacta para compatibilidad con modo regiones.
 # =============================================================================
-
-class CareerUserStats(database.Base):
-    """
-    Estadísticas agregadas de carrera por usuario (1 fila por user).
-    Facilita ORDER BY para ranking: stages_completed DESC, total_score DESC,
-    total_hints_used ASC, total_time_seconds ASC, last_activity_at ASC.
-    """
-    __tablename__ = "career_user_stats"
-
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
-    stages_completed = Column(Integer, default=0, server_default='0', nullable=False)
-    total_score = Column(Integer, default=0, server_default='0', nullable=False)
-    total_hints_used = Column(Integer, default=0, server_default='0', nullable=False)
-    total_time_seconds = Column(Integer, default=0, server_default='0', nullable=False)
-    total_mistakes = Column(Integer, default=0, server_default='0', nullable=False)
-    last_activity_at = Column(DateTime, default=utc_now, nullable=False)
-    created_at = Column(DateTime, default=utc_now, nullable=False)
-
-    __table_args__ = (
-        Index('ix_career_ranking', 
-              stages_completed.desc(), 
-              total_score.desc(), 
-              total_hints_used.asc(), 
-              total_time_seconds.asc(),
-              last_activity_at.asc()),
-    )
-
-    user = relationship("User", back_populates="career_stats")
-
 
 class CareerSeasonProfile(database.Base):
     """País y región inmutables de un jugador dentro de una temporada."""

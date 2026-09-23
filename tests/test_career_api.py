@@ -208,6 +208,12 @@ def test_difficulties_are_ranked_separately():
     assert normal_board["items"][0]["difficulty"] == "normal"
     assert easy_board["items"][0]["difficulty"] == "easy"
 
+    normal_profile = client.get("/career/me?difficulty=normal").json()
+    easy_profile = client.get("/career/me?difficulty=easy").json()
+    assert normal_profile["total_score"] == normal.json()["score"]
+    assert easy_profile["total_score"] == easy.json()["score"]
+    assert "career_user_stats" not in Base.metadata.tables
+
 
 def test_server_chooses_the_plan_and_rejects_a_client_supplied_subset():
     response = client.post(
