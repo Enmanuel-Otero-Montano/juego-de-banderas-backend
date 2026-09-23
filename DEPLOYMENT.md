@@ -17,6 +17,10 @@ Copiar `.env.example` como `.env` únicamente en el servidor y completar:
 - `ALLOWED_ORIGINS`: lista mínima; para la app Capacitor incluir `https://localhost`.
 - `BASE_URL`: URL HTTPS del frontend que recibe la confirmación de correo.
 - `DAILY_MAX_ATTEMPTS`: entre 3 y 6; el valor recomendado es 4.
+- `RATE_LIMIT_STORAGE_URI`: opcional. Una URI de Redis o Key Value permite que
+  los límites sobrevivan reinicios y se compartan entre instancias. Para el
+  lanzamiento inicial puede omitirse y usar memoria local; usar `rediss://`
+  si la conexión no viaja por red privada.
 - SMTP y `VERIFICATION_LINK`: todos obligatorios en producción.
 
 La aplicación se niega a iniciar en producción si detecta wildcard CORS, HTTP, secreto débil, base no PostgreSQL o correo incompleto.
@@ -60,3 +64,13 @@ Configurar además:
 - backup automático de PostgreSQL y una prueba de restauración;
 - actualización de dependencias y revisión periódica de vulnerabilidades;
 - secretos en el almacén del proveedor, nunca en `.env` versionado.
+
+## RLS de PostgreSQL
+
+La aplicación móvil no se conecta directamente a PostgreSQL: toda autorización
+se realiza en la API mediante el usuario autenticado. No activar RLS sobre las
+tablas existentes sin antes separar el rol de migraciones del rol de ejecución
+y establecer el ID autenticado dentro de cada transacción; hacerlo con el rol
+actual bloquearía rutas públicas y de autenticación. Si se añade RLS, debe
+probarse primero en una base de staging con políticas por tabla y una conexión
+de aplicación sin privilegio `BYPASSRLS`.

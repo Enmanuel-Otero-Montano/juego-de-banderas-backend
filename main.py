@@ -14,6 +14,7 @@ from starlette import status as starlette_status
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from slowapi.middleware import SlowAPIMiddleware
 from utils.limiter import limiter
 
 from sqlalchemy.orm import Session
@@ -28,7 +29,9 @@ import smtplib
 from email.mime.text import MIMEText
 
 from PIL import Image
+from PIL import UnidentifiedImageError
 from io import BytesIO
+import warnings
 
 from repository import register_login
 from schemas import user_schema, token
@@ -95,6 +98,7 @@ logger = setup_logging()
 # Rate limiting configuration
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 @app.exception_handler(RateLimitExceeded)
 async def custom_rate_limit_handler(request: Request, exc: RateLimitExceeded):
@@ -194,6 +198,46 @@ BASE_URL = settings.BASE_URL
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 password_hash = PasswordHash((Argon2Hasher(), BcryptHasher()))
 
+MAX_PROFILE_IMAGE_BYTES = 2 * 1024 * 1024
+MAX_PROFILE_IMAGE_PIXELS = 16_000_000
+PROFILE_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png"}
+PROFILE_IMAGE_FORMATS = {"JPEG", "PNG"}
+
+
+async def read_valid_profile_image(profile_image: UploadFile | None) -> bytes | None:
+    """Lee una imagen de perfil acotada y comprueba su formato real.
+
+    El Content-Type del cliente no es suficiente: Pillow verifica la cabecera
+    del archivo y el límite de píxeles evita imágenes comprimidas que ocupen
+    poca memoria en tránsito pero se expandan excesivamente al procesarlas.
+    """
+    if profile_image is None:
+        return None
+    if profile_image.content_type not in PROFILE_IMAGE_MEDIA_TYPES:
+        raise HTTPException(status_code=415, detail="Profile image must be a PNG or JPEG")
+
+    image_content = await profile_image.read(MAX_PROFILE_IMAGE_BYTES + 1)
+    if len(image_content) > MAX_PROFILE_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Profile image must be at most 2 MB")
+    if not image_content:
+        raise HTTPException(status_code=422, detail="Profile image cannot be empty")
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(image_content)) as image:
+                if image.format not in PROFILE_IMAGE_FORMATS:
+                    raise HTTPException(status_code=415, detail="Profile image must be a PNG or JPEG")
+                if image.width * image.height > MAX_PROFILE_IMAGE_PIXELS:
+                    raise HTTPException(status_code=422, detail="Profile image has too many pixels")
+                image.verify()
+    except HTTPException:
+        raise
+    except (Image.DecompressionBombError, UnidentifiedImageError, OSError, ValueError):
+        raise HTTPException(status_code=422, detail="Invalid profile image")
+
+    return image_content
+
 
 def get_db():
     db = database.SessionLocal()
@@ -226,13 +270,10 @@ async def register_user(
     if register_login.check_username_exist(db, username):  # <-- NUEVO
         raise HTTPException(status_code=400, detail="Username already taken")
     db_user = register_login.check_user_exist(db, email)
-    image_content = await profile_image.read() if profile_image else None
+    image_content = await read_valid_profile_image(profile_image)
 
     if db_user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
-    
-    if image_content and len(image_content) > 2 * 1024 * 1024:  # Limite de 2MB como ejemplo
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Image too large")
     
     hashed_password = get_password_hash(password)
     new_user = models.User(
@@ -539,7 +580,9 @@ async def read_users_me(current_user: Annotated[user_schema.User, Depends(get_cu
 
 
 @app.put("/users/me/onboarding")
+@limiter.limit("30/minute")
 async def update_onboarding(
+    request: Request,
     onboarding_data: user_schema.OnboardingUpdate,
     current_user: Annotated[user_schema.User, Depends(get_current_active_user)],
     db: Session = Depends(get_db)
@@ -556,8 +599,9 @@ async def update_onboarding(
 
 
 @app.put("/user/profile", response_model=user_schema.UserRegisterResponse)
-async def update_user_profile(username: Annotated[str, Form()], full_name: Annotated[Optional[str], Form()], profile_image: Annotated[Optional[UploadFile], File()], country: Annotated[str, Form()], current_user: Annotated[user_schema.User, Depends(get_current_active_user)], delete_current_profile_image: Annotated[bool, Form()] = False, db: Session = Depends(get_db)):
-    profile_image_bytes = await profile_image.read() if profile_image else None
+@limiter.limit("10/minute")
+async def update_user_profile(request: Request, username: Annotated[str, Form(min_length=3, max_length=24)], full_name: Annotated[Optional[str], Form(max_length=120)], profile_image: Annotated[Optional[UploadFile], File()], country: Annotated[str, Form(max_length=80)], current_user: Annotated[user_schema.User, Depends(get_current_active_user)], delete_current_profile_image: Annotated[bool, Form()] = False, db: Session = Depends(get_db)):
+    profile_image_bytes = await read_valid_profile_image(profile_image)
     user_profile_update = user_schema.UserProfileUpdate(
         username=username,
         full_name=full_name,
@@ -569,9 +613,13 @@ async def update_user_profile(username: Annotated[str, Form()], full_name: Annot
 
 @app.get("/user-profile/{user_id}", response_model=user_schema.UserEditProfileCurrentData)
 async def get_user_profile(user_id: int, current_user: Annotated[user_schema.User, Depends(get_current_active_user)], db: Session = Depends(get_db)):
-    user_profile = register_login.get_user_profile(db, user_id)
+    # Ruta heredada: nunca permitir que el ID de la URL cambie el principal
+    # autorizado. Los clientes nuevos deben consultar /users/me.
+    if user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You can only read your own profile")
+    user_profile = register_login.get_user_profile(db, current_user.id)
     if not user_profile:
-        raise HTTPException(status_code=401, detail="User not found")
+        raise HTTPException(status_code=404, detail="User not found")
     return user_profile
 
 @app.get("/", include_in_schema=False)

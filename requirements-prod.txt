@@ -20,3 +20,5 @@ bcrypt==4.3.0
 Pillow==12.3.0
 requests==2.34.2
 slowapi==0.1.10
+# Backend requerido por limits/slowapi cuando RATE_LIMIT_STORAGE_URI usa Redis.
+redis>=5,<8

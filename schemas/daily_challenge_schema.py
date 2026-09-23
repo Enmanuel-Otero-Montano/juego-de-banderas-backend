@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class GuessAnswer(BaseModel):
@@ -29,7 +29,12 @@ class DailyChallengeStatus(BaseModel):
 
 
 class GuessRequest(BaseModel):
-    guess: str
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    # Se persiste el texto original del intento: mantenerlo acotado evita que
+    # una petición autenticada o anónima convierta la tabla en almacenamiento
+    # arbitrario.
+    guess: str = Field(min_length=1, max_length=120)
 
 
 class GuessResponse(BaseModel):

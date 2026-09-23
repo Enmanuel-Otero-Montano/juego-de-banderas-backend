@@ -23,13 +23,14 @@ def production_settings(**overrides):
         "SENDER_PASSWORD": "mail-secret",
         "VERIFICATION_LINK": "https://atlas.example/verify",
         "BASE_URL": "https://api.atlas.example",
+        "RATE_LIMIT_STORAGE_URI": "rediss://atlas:secret@redis.example:6379/0",
     }
     values.update(overrides)
     return Settings(**values)
 
 
 def test_valid_production_settings_are_accepted():
-    settings = production_settings()
+    settings = production_settings(RATE_LIMIT_STORAGE_URI=None)
     assert settings.ENV == "production"
     assert settings.ALGORITHM == "HS256"
     assert settings.DAILY_MAX_ATTEMPTS == 4
@@ -45,6 +46,7 @@ def test_valid_production_settings_are_accepted():
         {"SMTP_SERVER": None},
         {"VERIFICATION_LINK": "http://atlas.example/verify"},
         {"BASE_URL": "http://api.atlas.example"},
+        {"RATE_LIMIT_STORAGE_URI": "memory://"},
         {"ALGORITHM": "none"},
         {"DAILY_MAX_ATTEMPTS": 2},
         {"DAILY_MAX_ATTEMPTS": 7},

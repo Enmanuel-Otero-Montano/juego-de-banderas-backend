@@ -19,6 +19,7 @@ from db.models import CareerAttempt, StageRun, User
 from dependencies import get_current_active_user, get_db
 from routers.career import router
 from routers.users import user_router
+from schemas.daily_challenge_schema import GuessRequest
 from utils.career_scoring import calculate_score
 from utils.career_rules import STAGE_COUNTRY_CODES
 import main as backend_main
@@ -52,6 +53,7 @@ app.dependency_overrides[get_db] = override_get_db
 app.dependency_overrides[get_current_active_user] = override_current_user
 client = TestClient(app)
 backend_main.app.dependency_overrides[backend_main.get_db] = override_get_db
+backend_main.app.dependency_overrides[backend_main.get_current_active_user] = override_current_user
 registration_client = TestClient(backend_main.app, raise_server_exceptions=False)
 
 
@@ -339,6 +341,22 @@ def test_account_deletion_removes_profile_and_ranked_results():
 
     leaderboard = client.get("/career/leaderboard?difficulty=normal").json()
     assert leaderboard["total"] == 0
+
+
+def test_legacy_profile_route_is_scoped_to_the_authenticated_user():
+    own_profile = registration_client.get("/user-profile/1")
+    assert own_profile.status_code == 200
+    assert own_profile.json()["username"] == "atlas"
+
+    response = registration_client.get("/user-profile/2")
+    assert response.status_code == 403
+    assert response.json()["message"] == "You can only read your own profile"
+
+
+def test_daily_guess_is_trimmed_and_bounded_before_persistence():
+    assert GuessRequest(guess="  Uruguay ").guess == "Uruguay"
+    with pytest.raises(ValueError):
+        GuessRequest(guess="x" * 121)
 
 
 def test_registration_validates_credentials_and_normalizes_identity():

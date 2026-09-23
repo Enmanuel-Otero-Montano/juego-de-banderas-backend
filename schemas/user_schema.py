@@ -1,6 +1,6 @@
 from datetime import date
 
-from pydantic import BaseModel, EmailStr, ConfigDict
+from pydantic import BaseModel, EmailStr, ConfigDict, Field, field_validator
 from typing import Optional
 
 
@@ -24,12 +24,21 @@ class User(UserBase):
     model_config = ConfigDict(from_attributes=True)
 
 class UserProfileUpdate(BaseModel):
-    username: Optional[str] = None
-    full_name: Optional[str] = None
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    username: Optional[str] = Field(default=None, min_length=3, max_length=24)
+    full_name: Optional[str] = Field(default=None, max_length=120)
     profile_image: Optional[bytes] = None
-    country: Optional[str] = None
-    ranking_alias: Optional[str] = None
-    ranking_region: Optional[str] = None
+    country: Optional[str] = Field(default=None, max_length=80)
+    ranking_alias: Optional[str] = Field(default=None, max_length=24)
+    ranking_region: Optional[str] = Field(default=None, max_length=20)
+
+    @field_validator("username")
+    @classmethod
+    def username_cannot_be_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.strip():
+            raise ValueError("username cannot be blank")
+        return value
 
 class UserRegisterResponse(BaseModel):
     id: int

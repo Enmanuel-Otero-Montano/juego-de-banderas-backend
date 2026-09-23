@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     # Entorno y CORS
     ENV: Literal["development", "production", "test"]
     ALLOWED_ORIGINS: list[str] = []
+    # Opcional: permite compartir los límites entre instancias. La URI puede
+    # incluir una contraseña, por eso se trata como secreto.
+    RATE_LIMIT_STORAGE_URI: SecretStr | None = None
 
     # Otros (con defaults / cast autom.)
     ALGORITHM: Literal["HS256"] = "HS256"
@@ -86,6 +89,10 @@ class Settings(BaseSettings):
                 raise ValueError("VERIFICATION_LINK debe usar HTTPS en producción.")
             if not self.BASE_URL.startswith("https://"):
                 raise ValueError("BASE_URL debe usar HTTPS en producción.")
+            if self.RATE_LIMIT_STORAGE_URI:
+                rate_limit_storage_uri = self.RATE_LIMIT_STORAGE_URI.get_secret_value()
+                if not rate_limit_storage_uri.startswith(("redis://", "rediss://")):
+                    raise ValueError("RATE_LIMIT_STORAGE_URI debe usar redis:// o rediss://.")
         return self
 
 @lru_cache
