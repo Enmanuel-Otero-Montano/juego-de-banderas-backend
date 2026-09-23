@@ -1,6 +1,6 @@
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from config import settings
+from utils.client_ip import get_client_ip
 
 
 def _storage_uri() -> str:
@@ -11,7 +11,7 @@ def _storage_uri() -> str:
 
 
 limiter = Limiter(
-    key_func=get_remote_address,
+    key_func=get_client_ip,
     default_limits=["200/hour"],
     storage_uri=_storage_uri(),
 )

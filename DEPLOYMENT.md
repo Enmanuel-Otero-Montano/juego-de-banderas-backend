@@ -33,7 +33,7 @@ Con un entorno Python administrado por el proveedor:
 python -m venv venv
 venv/bin/pip install -r requirements-prod.txt
 venv/bin/alembic upgrade head
-venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers
+venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 O con el `Dockerfile` incluido:

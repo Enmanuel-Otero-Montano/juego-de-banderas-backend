@@ -10,6 +10,7 @@ import pytest
 import bcrypt
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -23,6 +24,7 @@ from schemas.daily_challenge_schema import GuessRequest
 from utils.career_scoring import calculate_score
 from utils.career_rules import STAGE_COUNTRY_CODES
 from utils.auth_rate_limit import consume_auth_attempt
+from utils.client_ip import get_client_ip
 from utils.country_regions import COUNTRY_REGION
 import main as backend_main
 
@@ -499,3 +501,19 @@ def test_shared_auth_limit_rejects_attempts_over_the_window_limit():
         with pytest.raises(backend_main.HTTPException) as error:
             consume_auth_attempt(db, scope="login", subject="atlas@example.com", client_ip="127.0.0.1", maximum=2, window_seconds=60)
     assert error.value.status_code == 429
+
+
+def test_client_ip_uses_cloudflare_header_only_from_render_private_proxy():
+    render_request = Request({
+        "type": "http",
+        "headers": [(b"cf-connecting-ip", b"186.55.204.150"), (b"x-forwarded-for", b"203.0.113.17")],
+        "client": ("10.238.25.42", 12345),
+    })
+    direct_request = Request({
+        "type": "http",
+        "headers": [(b"cf-connecting-ip", b"203.0.113.17")],
+        "client": ("8.8.8.8", 12345),
+    })
+
+    assert get_client_ip(render_request) == "186.55.204.150"
+    assert get_client_ip(direct_request) == "8.8.8.8"
