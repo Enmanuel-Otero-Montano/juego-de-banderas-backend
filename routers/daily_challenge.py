@@ -10,9 +10,19 @@ from dependencies import get_db, get_current_user_optional
 from repository import daily_challenge_repo
 from schemas import daily_challenge_schema
 
+
+def daily_challenge_retired():
+    """Evita que el diario legado compita con el diario local del MVP."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="The legacy daily challenge was retired; use the mobile daily challenge",
+    )
+
+
 router = APIRouter(
     prefix="/daily-challenge",
-    tags=["Daily Challenge"]
+    tags=["Legacy Daily Challenge"],
+    dependencies=[Depends(daily_challenge_retired)],
 )
 
 from config import settings

@@ -436,6 +436,13 @@ def test_daily_guess_is_trimmed_and_bounded_before_persistence():
         GuessRequest(guess="x" * 121)
 
 
+def test_legacy_daily_challenge_is_explicitly_retired():
+    response = registration_client.get("/daily-challenge/today")
+
+    assert response.status_code == 410
+    assert response.json()["message"] == "The legacy daily challenge was retired; use the mobile daily challenge"
+
+
 def test_registration_validates_credentials_and_normalizes_identity():
     short_password = registration_client.post(
         "/register",
