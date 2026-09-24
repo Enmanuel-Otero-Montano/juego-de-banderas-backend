@@ -5,6 +5,8 @@ class Token(BaseModel):
     refresh_token: str
     token_type: str
     expires_in: int
+    # Identificador estable para asociar las compras a la cuenta autenticada.
+    user_id: int
 
 
 class RefreshTokenRequest(BaseModel):

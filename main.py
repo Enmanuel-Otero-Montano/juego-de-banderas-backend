@@ -605,6 +605,7 @@ def issue_token_pair(db: Session, user: models.User, family_id: str | None = Non
         "refresh_token": refresh_token,
         "token_type": "bearer",
         "expires_in": int(ACCESS_TOKEN_EXPIRE_MINUTES * 60),
+        "user_id": user.id,
     }
 
 

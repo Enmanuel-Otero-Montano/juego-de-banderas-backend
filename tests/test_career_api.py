@@ -535,11 +535,13 @@ def test_refresh_tokens_rotate_and_reuse_revokes_their_family():
     first = issued.json()
     assert first["expires_in"] == 1800
     assert first["refresh_token"]
+    assert first["user_id"] == 1
 
     rotated = registration_client.post("/token/refresh", json={"refresh_token": first["refresh_token"]})
     assert rotated.status_code == 200
     second = rotated.json()
     assert second["refresh_token"] != first["refresh_token"]
+    assert second["user_id"] == 1
 
     reused = registration_client.post("/token/refresh", json={"refresh_token": first["refresh_token"]})
     assert reused.status_code == 401
