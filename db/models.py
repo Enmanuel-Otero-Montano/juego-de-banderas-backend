@@ -32,6 +32,7 @@ class User(database.Base):
     stage_runs = relationship("StageRun", back_populates="user", cascade="all, delete")
     career_attempts = relationship("CareerAttempt", back_populates="user", cascade="all, delete")
     career_season_profiles = relationship("CareerSeasonProfile", back_populates="user", cascade="all, delete")
+    refresh_sessions = relationship("AuthRefreshSession", back_populates="user", cascade="all, delete-orphan")
 
 
 class AuthRateLimit(database.Base):
@@ -41,6 +42,24 @@ class AuthRateLimit(database.Base):
     window_started_at = Column(DateTime, nullable=False)
     attempts = Column(Integer, nullable=False, default=0)
     updated_at = Column(DateTime, nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class AuthRefreshSession(database.Base):
+    """Refresh tokens opacos: la base conserva solamente un hash irreversible."""
+    __tablename__ = "auth_refresh_sessions"
+
+    id = Column(String(36), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    family_id = Column(String(36), nullable=False, index=True)
+    token_hash = Column(String(64), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+    replaced_by = Column(String(36), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now)
+
+    user = relationship("User", back_populates="refresh_sessions")
+
+    __table_args__ = (Index("ix_auth_refresh_sessions_token_hash", "token_hash", unique=True),)
 
 
 class DailyChallenge(database.Base):

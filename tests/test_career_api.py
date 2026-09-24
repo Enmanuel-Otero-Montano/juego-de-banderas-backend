@@ -5,6 +5,8 @@ os.environ["ENV"] = "test"
 os.environ["SECRET_KEY"] = "test-secret-key-with-at-least-32-characters"
 os.environ["DATABASE_URL"] = "sqlite+pysqlite://"
 os.environ["ALLOWED_ORIGINS"] = '["http://testserver"]'
+os.environ["ACCESS_TOKEN_EXPIRE_MINUTES"] = "30"
+os.environ["REFRESH_TOKEN_EXPIRE_DAYS"] = "30"
 
 import pytest
 import bcrypt
@@ -513,6 +515,33 @@ def test_successful_login_migrates_legacy_bcrypt_hash_to_argon2():
         assert migrated.hashed_password.startswith("$argon2id$")
 
 
+def test_refresh_tokens_rotate_and_reuse_revokes_their_family():
+    with TestingSessionLocal() as db:
+        user = db.query(User).filter(User.id == 1).one()
+        user.hashed_password = backend_main.get_password_hash("initial-password")
+        db.commit()
+    issued = registration_client.post("/token", data={"username": "atlas", "password": "initial-password"})
+    assert issued.status_code == 200
+    first = issued.json()
+    assert first["expires_in"] == 1800
+    assert first["refresh_token"]
+
+    rotated = registration_client.post("/token/refresh", json={"refresh_token": first["refresh_token"]})
+    assert rotated.status_code == 200
+    second = rotated.json()
+    assert second["refresh_token"] != first["refresh_token"]
+
+    reused = registration_client.post("/token/refresh", json={"refresh_token": first["refresh_token"]})
+    assert reused.status_code == 401
+    revoked_family = registration_client.post("/token/refresh", json={"refresh_token": second["refresh_token"]})
+    assert revoked_family.status_code == 401
+
+    with TestingSessionLocal() as db:
+        sessions = db.query(backend_main.models.AuthRefreshSession).filter(backend_main.models.AuthRefreshSession.user_id == 1).all()
+        assert len(sessions) == 2
+        assert all(session.token_hash != first["refresh_token"] for session in sessions)
+
+
 def test_verification_resend_does_not_disclose_account_existence():
     known = registration_client.post("/resend-verification-email", json="atlas@example.com")
     unknown = registration_client.post("/resend-verification-email", json="missing@example.com")
@@ -536,6 +565,12 @@ def test_password_reset_does_not_disclose_account_existence_and_invalidates_used
     }
 
     with TestingSessionLocal() as db:
+        user = db.query(User).filter(User.id == 1).one()
+        user.hashed_password = backend_main.get_password_hash("initial-password")
+        db.commit()
+    issued = registration_client.post("/token", data={"username": "atlas", "password": "initial-password"})
+    assert issued.status_code == 200
+    with TestingSessionLocal() as db:
         user = db.query(User).filter(User.email == "atlas@example.com").one()
         token = backend_main.create_password_reset_token(user.email, user.hashed_password)
 
@@ -544,6 +579,7 @@ def test_password_reset_does_not_disclose_account_existence_and_invalidates_used
 
     assert changed.status_code == 200
     assert reused.status_code == 400
+    assert registration_client.post("/token/refresh", json={"refresh_token": issued.json()["refresh_token"]}).status_code == 401
     assert registration_client.post("/token", data={"username": "atlas", "password": "new-secure-password"}).status_code == 200
 
 

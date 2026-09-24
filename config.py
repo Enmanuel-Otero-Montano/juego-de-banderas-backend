@@ -24,7 +24,8 @@ class Settings(BaseSettings):
 
     # Otros (con defaults / cast autom.)
     ALGORITHM: Literal["HS256"] = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: float = 2880
+    ACCESS_TOKEN_EXPIRE_MINUTES: float = Field(default=30, gt=0, le=2880)
+    REFRESH_TOKEN_EXPIRE_DAYS: int = Field(default=30, ge=1, le=90)
 
     SMTP_SERVER: str | None = None
     SMTP_PORT: int | None = None
@@ -90,6 +91,10 @@ class Settings(BaseSettings):
                 raise ValueError("VERIFICATION_LINK debe usar HTTPS en producción.")
             if not self.BASE_URL.startswith("https://"):
                 raise ValueError("BASE_URL debe usar HTTPS en producción.")
+            if self.ACCESS_TOKEN_EXPIRE_MINUTES != 30:
+                raise ValueError("ACCESS_TOKEN_EXPIRE_MINUTES debe ser 30 en producción.")
+            if self.REFRESH_TOKEN_EXPIRE_DAYS != 30:
+                raise ValueError("REFRESH_TOKEN_EXPIRE_DAYS debe ser 30 en producción.")
             if self.RATE_LIMIT_STORAGE_URI:
                 rate_limit_storage_uri = self.RATE_LIMIT_STORAGE_URI.get_secret_value()
                 if not rate_limit_storage_uri.startswith(("redis://", "rediss://")):

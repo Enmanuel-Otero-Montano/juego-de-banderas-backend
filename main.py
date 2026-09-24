@@ -30,7 +30,9 @@ import smtplib
 from email.mime.text import MIMEText
 from hashlib import sha256
 from hmac import compare_digest
+from secrets import token_urlsafe
 from urllib.parse import quote
+from uuid import uuid4
 
 from PIL import Image
 from PIL import UnidentifiedImageError
@@ -197,6 +199,7 @@ async def unhandled_exc_handler(request: Request, exc: Exception):
 # Variables de entorno
 SECRET_KEY = settings.SECRET_KEY.get_secret_value()
 ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
+REFRESH_TOKEN_EXPIRE_DAYS = settings.REFRESH_TOKEN_EXPIRE_DAYS
 ALGORITHM = settings.ALGORITHM
 SMTP_SERVER = settings.SMTP_SERVER
 SMTP_PORT = settings.SMTP_PORT
@@ -500,6 +503,7 @@ def confirm_password_reset(
         raise HTTPException(status_code=400, detail="Password reset link is no longer valid")
 
     user.hashed_password = get_password_hash(payload.password)
+    revoke_all_refresh_sessions(db, user.id)
     db.commit()
     return {"msg": "Password updated"}
 
@@ -551,6 +555,84 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     if "sub" in to_encode:
         to_encode["sub"] = str(to_encode["sub"])
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def _utc_now_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _refresh_token_hash(refresh_token: str) -> str:
+    return sha256(refresh_token.encode("utf-8")).hexdigest()
+
+
+def revoke_all_refresh_sessions(db: Session, user_id: int) -> None:
+    """Revoca sesiones persistentes al cambiar contraseña o cerrar una cuenta."""
+    db.query(models.AuthRefreshSession).filter(
+        models.AuthRefreshSession.user_id == user_id,
+        models.AuthRefreshSession.revoked_at.is_(None),
+    ).update({models.AuthRefreshSession.revoked_at: _utc_now_naive()}, synchronize_session=False)
+
+
+def issue_token_pair(db: Session, user: models.User, family_id: str | None = None) -> dict[str, str | int]:
+    refresh_token = token_urlsafe(48)
+    session = models.AuthRefreshSession(
+        id=str(uuid4()),
+        user_id=user.id,
+        family_id=family_id or str(uuid4()),
+        token_hash=_refresh_token_hash(refresh_token),
+        expires_at=_utc_now_naive() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
+    )
+    db.add(session)
+    db.commit()
+    access_token = create_access_token(
+        data={"sub": user.id, "purpose": "access"},
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "expires_in": int(ACCESS_TOKEN_EXPIRE_MINUTES * 60),
+    }
+
+
+def rotate_refresh_token(db: Session, refresh_token: str) -> dict[str, str | int]:
+    """Rota un refresh opaco y revoca su familia si se reutiliza uno viejo."""
+    record = db.query(models.AuthRefreshSession).with_for_update().filter(
+        models.AuthRefreshSession.token_hash == _refresh_token_hash(refresh_token)
+    ).first()
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Refresh token inválido o vencido",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if not record:
+        raise credentials_exception
+
+    now = _utc_now_naive()
+    if record.revoked_at or record.expires_at <= now:
+        db.query(models.AuthRefreshSession).filter(
+            models.AuthRefreshSession.user_id == record.user_id,
+            models.AuthRefreshSession.family_id == record.family_id,
+            models.AuthRefreshSession.revoked_at.is_(None),
+        ).update({models.AuthRefreshSession.revoked_at: now}, synchronize_session=False)
+        db.commit()
+        raise credentials_exception
+
+    user = record.user
+    if not user or not user.is_active or not user.is_verified:
+        record.revoked_at = now
+        db.commit()
+        raise credentials_exception
+
+    record.revoked_at = now
+    replacement = issue_token_pair(db, user, family_id=record.family_id)
+    replacement_record = db.query(models.AuthRefreshSession).filter(
+        models.AuthRefreshSession.token_hash == _refresh_token_hash(str(replacement["refresh_token"]))
+    ).one()
+    record.replaced_by = replacement_record.id
+    db.commit()
+    return replacement
 
 
 
@@ -606,11 +688,10 @@ async def login_for_access_token(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                             detail={"message": "Usuario no verificado", "email": user.email},
                             headers={"WWW-Authenticate": "Bearer"})
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(data={"sub": user.id}, expires_delta=access_token_expires)
+    session_tokens = issue_token_pair(db, user)
     full_name = user.full_name if user.full_name else user.username
     profile_image_url = f"/user/{user.id}/profile_image"
-    return {"access_token": access_token, "token_type": "bearer", "full_name": full_name, "profile_image_url": profile_image_url, "user_id": user.id}
+    return {**session_tokens, "full_name": full_name, "profile_image_url": profile_image_url, "user_id": user.id}
 
 #@app.post("/refresh")
 # def refresh(response: Response, refresh_token: Optional[str] = Cookie(None)):
@@ -655,12 +736,17 @@ async def issue_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.id},
-        expires_delta=access_token_expires
-    )
-    return {"access_token": access_token, "token_type": "bearer"}
+    return issue_token_pair(db, user)
+
+
+@app.post("/token/refresh", response_model=token.Token, tags=["auth"])
+@limiter.limit("30/minute")
+async def refresh_access_token(
+    request: Request,
+    payload: token.RefreshTokenRequest,
+    db: Session = Depends(get_db),
+):
+    return rotate_refresh_token(db, payload.refresh_token)
 
 
 @app.get("/user/{user_id}/profile_image")

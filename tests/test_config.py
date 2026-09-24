@@ -7,6 +7,8 @@ os.environ.setdefault("ENV", "test")
 os.environ.setdefault("SECRET_KEY", "test-secret-key-with-at-least-32-characters")
 os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite://")
 os.environ.setdefault("ALLOWED_ORIGINS", '["http://testserver"]')
+os.environ.setdefault("ACCESS_TOKEN_EXPIRE_MINUTES", "30")
+os.environ.setdefault("REFRESH_TOKEN_EXPIRE_DAYS", "30")
 
 from config import Settings
 
@@ -34,6 +36,8 @@ def test_valid_production_settings_are_accepted():
     assert settings.ENV == "production"
     assert settings.ALGORITHM == "HS256"
     assert settings.DAILY_MAX_ATTEMPTS == 4
+    assert settings.ACCESS_TOKEN_EXPIRE_MINUTES == 30
+    assert settings.REFRESH_TOKEN_EXPIRE_DAYS == 30
 
 
 @pytest.mark.parametrize(
@@ -47,6 +51,8 @@ def test_valid_production_settings_are_accepted():
         {"VERIFICATION_LINK": "http://atlas.example/verify"},
         {"BASE_URL": "http://api.atlas.example"},
         {"RATE_LIMIT_STORAGE_URI": "memory://"},
+        {"ACCESS_TOKEN_EXPIRE_MINUTES": 60},
+        {"REFRESH_TOKEN_EXPIRE_DAYS": 31},
         {"ALGORITHM": "none"},
         {"DAILY_MAX_ATTEMPTS": 2},
         {"DAILY_MAX_ATTEMPTS": 7},
