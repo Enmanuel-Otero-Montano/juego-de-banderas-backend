@@ -36,6 +36,8 @@ async def get_current_user(
     )
     try:
         payload = jwt.decode(user_token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("purpose") not in (None, "access"):
+            raise credentials_exception
         sub = payload.get("sub")
         if sub is None:
             raise credentials_exception
@@ -71,6 +73,8 @@ async def get_current_user_optional(
         
     try:
         payload = jwt.decode(user_token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("purpose") not in (None, "access"):
+            return None
         sub = payload.get("sub")
         if sub is None:
             return None
