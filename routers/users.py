@@ -1,7 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import Response
+from fastapi.responses import RedirectResponse, Response
 from sqlalchemy.orm import Session
 
 from db.models import DailyAttempt, User
@@ -31,11 +31,7 @@ def delete_my_account(
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-@user_router.get("/{user_id}/profile-image")
-def get_profile_image(user_id: int, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user or not user.profile_image:
-        raise HTTPException(status_code=404, detail="Profile image not found")
-
-    # Ajustá el media_type si tus imágenes no son PNG
-    return Response(content=user.profile_image, media_type="image/png")
+@user_router.get("/{user_id}/profile-image", include_in_schema=False)
+def get_legacy_profile_image(user_id: int):
+    """Compatibilidad temporal con clientes que aún usan la ruta anterior."""
+    return RedirectResponse(url=f"/user/{user_id}/profile_image", status_code=status.HTTP_307_TEMPORARY_REDIRECT)

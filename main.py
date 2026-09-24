@@ -59,7 +59,14 @@ from schemas.user_schema import UserRegisterResponse
 if settings.ENV != "production":
     database.Base.metadata.create_all(bind=database.engine)
 
-app = FastAPI()
+def api_documentation_urls(environment: str) -> dict[str, str | None]:
+    """No publicar el inventario de la API en el entorno de producción."""
+    if environment == "production":
+        return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    return {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
+
+
+app = FastAPI(**api_documentation_urls(settings.ENV))
 
 # Configurar logging
 def setup_logging():
@@ -738,4 +745,4 @@ async def get_user_profile(user_id: int, current_user: Annotated[user_schema.Use
 
 @app.get("/", include_in_schema=False)
 def root():
-    return RedirectResponse("/docs")
+    return {"status": "ok"}

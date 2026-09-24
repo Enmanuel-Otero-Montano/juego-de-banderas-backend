@@ -436,6 +436,22 @@ def test_legacy_profile_route_is_scoped_to_the_authenticated_user():
     assert response.json()["message"] == "You can only read your own profile"
 
 
+def test_legacy_avatar_route_redirects_to_the_canonical_endpoint():
+    response = client.get("/users/1/profile-image", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/user/1/profile_image"
+
+
+def test_api_documentation_is_disabled_in_production():
+    assert backend_main.api_documentation_urls("production") == {
+        "docs_url": None,
+        "redoc_url": None,
+        "openapi_url": None,
+    }
+    assert backend_main.api_documentation_urls("test")["docs_url"] == "/docs"
+
+
 def test_daily_guess_is_trimmed_and_bounded_before_persistence():
     assert GuessRequest(guess="  Uruguay ").guess == "Uruguay"
     with pytest.raises(ValueError):
