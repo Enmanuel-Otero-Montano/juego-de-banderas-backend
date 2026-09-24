@@ -1,10 +1,11 @@
 from typing import Annotated, Optional
 from datetime import timedelta, datetime, timezone
+from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Depends, status, Body, Form, UploadFile, File, Query, Request, Cookie
 
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
-from fastapi.responses import HTMLResponse, RedirectResponse, Response, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 
@@ -69,6 +70,7 @@ def api_documentation_urls(environment: str) -> dict[str, str | None]:
 
 
 app = FastAPI(**api_documentation_urls(settings.ENV))
+PUBLIC_PAGES_DIRECTORY = Path(__file__).with_name("public")
 
 # Configurar logging
 def setup_logging():
@@ -511,6 +513,16 @@ def confirm_password_reset(
 @app.get("/reset-password", response_class=HTMLResponse, include_in_schema=False)
 def password_reset_page():
     return """<!doctype html><html lang=\"es\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Restablecer contraseña</title><style>body{font-family:system-ui;max-width:28rem;margin:8vh auto;padding:1.5rem;color:#172033}label,input,button{display:block;width:100%;box-sizing:border-box}input,button{padding:.8rem;margin:.5rem 0 1rem}button{background:#166534;border:0;border-radius:.5rem;color:white;font-weight:700}#status{min-height:1.5rem}</style><main><h1>Restablecer contraseña</h1><p>Elige una contraseña nueva para tu cuenta.</p><form id=\"reset-form\"><label>Nueva contraseña<input id=\"password\" type=\"password\" minlength=\"8\" maxlength=\"72\" required autocomplete=\"new-password\"></label><button>Guardar contraseña</button></form><p id=\"status\" role=\"status\"></p></main><script>const token=new URLSearchParams(location.search).get('token');const form=document.getElementById('reset-form');const status=document.getElementById('status');if(!token){form.hidden=true;status.textContent='El enlace de recuperación no es válido.'}form.addEventListener('submit',async e=>{e.preventDefault();status.textContent='Guardando…';const response=await fetch('/password-reset/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,password:document.getElementById('password').value})});const result=await response.json().catch(()=>({}));status.textContent=response.ok?'Contraseña actualizada. Ya puedes volver a la app e iniciar sesión.':(result.detail||'No se pudo cambiar la contraseña.');if(response.ok)form.hidden=true})</script></html>"""
+
+
+@app.get("/privacy.html", include_in_schema=False)
+def privacy_page():
+    return FileResponse(PUBLIC_PAGES_DIRECTORY / "privacy.html", media_type="text/html")
+
+
+@app.get("/delete-account.html", include_in_schema=False)
+def delete_account_page():
+    return FileResponse(PUBLIC_PAGES_DIRECTORY / "delete-account.html", media_type="text/html")
 
 
 def verify_password(plain_password, hashed_password):

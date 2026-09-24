@@ -454,6 +454,16 @@ def test_api_documentation_is_disabled_in_production():
     assert backend_main.api_documentation_urls("test")["docs_url"] == "/docs"
 
 
+def test_public_privacy_and_account_deletion_pages_are_available():
+    privacy = registration_client.get("/privacy.html")
+    deletion = registration_client.get("/delete-account.html")
+
+    assert privacy.status_code == 200
+    assert "Política de privacidad" in privacy.text
+    assert deletion.status_code == 200
+    assert "Eliminar una cuenta" in deletion.text
+
+
 def test_daily_guess_is_trimmed_and_bounded_before_persistence():
     assert GuessRequest(guess="  Uruguay ").guess == "Uruguay"
     with pytest.raises(ValueError):
