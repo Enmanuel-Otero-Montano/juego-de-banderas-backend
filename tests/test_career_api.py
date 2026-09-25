@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 os.environ["ENV"] = "test"
@@ -618,3 +619,45 @@ def test_client_ip_uses_cloudflare_header_only_from_render_private_proxy():
 
     assert get_client_ip(render_request) == "186.55.204.150"
     assert get_client_ip(direct_request) == "8.8.8.8"
+
+
+def test_flag_atlas_uses_only_completed_attempts_of_the_current_user():
+    attempt = create_attempt(1, "normal")
+    codes = attempt["country_codes"]
+    wrong = record_selection(attempt, 1, codes[0], codes[1])
+    correct = record_selection(attempt, 2, codes[0], codes[0])
+    assert wrong.status_code == 201
+    assert correct.status_code == 201
+    assert client.post(f"/career/attempts/{attempt['attempt_id']}/complete").status_code == 200
+
+    open_attempt = create_attempt(1, "easy")
+    assert open_attempt["attempt_id"] != attempt["attempt_id"]
+
+    injected = client.post("/career/atlas", json={"flags": {"zz": {"seen": 9, "correct": 9, "wrong": 0}}})
+    queried = client.get("/career/atlas", params={"country_code": "zz"})
+    assert injected.status_code == 405
+    assert queried.status_code == 200
+    flags = queried.json()["flags"]
+    assert "zz" not in flags
+    assert flags[codes[0]] == {"seen": 1, "correct": 1, "wrong": 0}
+    assert flags[codes[1]] == {"seen": 1, "correct": 0, "wrong": 1}
+    assert set(flags) == set(codes)
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with TestingSessionLocal() as db:
+        db.add(CareerAttempt(
+            id="other-user-attempt",
+            user_id=2,
+            season_id="season-1",
+            ruleset_version=4,
+            content_version=1,
+            stage_id="1",
+            route_position=1,
+            difficulty="normal",
+            country_codes=["zz"],
+            started_at=now,
+            expires_at=now + timedelta(minutes=5),
+            completed_at=now,
+        ))
+        db.commit()
+    assert "zz" not in client.get("/career/atlas").json()["flags"]
