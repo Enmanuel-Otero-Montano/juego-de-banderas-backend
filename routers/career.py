@@ -79,6 +79,36 @@ def _attempt_answers(db: Session, attempt: CareerAttempt) -> list[dict]:
     ]
 
 
+def build_flag_atlas(db: Session, user_id: int) -> dict:
+    """Cuenta banderas solo en intentos de Viaje que este servidor ya cerró."""
+    attempts = db.query(CareerAttempt).filter(
+        CareerAttempt.user_id == user_id,
+        CareerAttempt.completed_at.isnot(None),
+    ).all()
+    if not attempts:
+        return {"flags": {}}
+
+    events = db.query(CareerAttemptEvent).filter(
+        CareerAttemptEvent.attempt_id.in_([attempt.id for attempt in attempts]),
+        CareerAttemptEvent.selected_code == CareerAttemptEvent.country_code,
+    ).all()
+    resolved = {(event.attempt_id, event.country_code.lower()) for event in events}
+    flags: dict[str, dict[str, int]] = {}
+    for attempt in attempts:
+        codes = attempt.country_codes if isinstance(attempt.country_codes, list) else []
+        for code in codes:
+            if not isinstance(code, str):
+                continue
+            normalized = code.lower()
+            entry = flags.setdefault(normalized, {"seen": 0, "correct": 0, "wrong": 0})
+            entry["seen"] += 1
+            if (attempt.id, normalized) in resolved:
+                entry["correct"] += 1
+            else:
+                entry["wrong"] += 1
+    return {"flags": flags}
+
+
 def _completion_payload(run: StageRun, best: StageBest | None, is_better: bool) -> dict:
     from utils.career_scoring import calculate_score
     answers = run.answers or []
@@ -431,6 +461,17 @@ async def complete_stage(
 ):
     """Rechaza el resumen final de clientes anteriores al protocolo v4."""
     raise HTTPException(status_code=426, detail="Ranking protocol upgrade required")
+
+
+@router.get("/atlas")
+@limiter.limit("60/minute")
+async def get_flag_atlas(
+    request: Request,
+    current_user: Annotated[user_schema.User, Depends(get_current_active_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Atlas del usuario. No acepta países ni totales: los deduce de intentos cerrados."""
+    return build_flag_atlas(db, current_user.id)
 
 
 @router.get("/me", response_model=CareerStatsResponse)
