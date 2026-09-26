@@ -285,6 +285,28 @@ def test_ranked_progression_cannot_skip_route_positions():
     assert response.json()["detail"] == "Complete the previous route stage before ranking this one"
 
 
+def test_ranked_progression_does_not_carry_across_difficulties():
+    assert complete_attempt(create_attempt(1, "easy")).status_code == 200
+    assert complete_attempt(create_attempt(1, "hard"), correct_count=1).status_code == 200
+
+    skipped = client.post(
+        "/career/attempts",
+        json={
+            "route_position": 2,
+            "content_stage_id": 2,
+            "difficulty": "hard",
+            "season_id": "season-1",
+            "ruleset_version": 4,
+            "content_version": 1,
+        },
+    )
+    assert skipped.status_code == 409
+    assert skipped.json()["detail"] == "Complete the previous route stage before ranking this one"
+
+    opened = create_attempt(2, "easy")
+    assert opened["country_codes"]
+
+
 def test_failed_run_is_audited_but_never_counted_as_completed():
     response = complete_attempt(create_attempt(1, "normal"), correct_count=6)
     assert response.status_code == 200

@@ -140,17 +140,22 @@ def validate_ranked_progression(
     user_id: int,
     route_position: int,
     content_stage_id: int,
+    difficulty: str,
 ) -> None:
-    """Bloquea saltos y fija el mapa ruta-contenido de la temporada."""
-    existing = db.query(StageBest.route_position, StageBest.stage_id).filter(
+    """Bloquea saltos dentro de una dificultad y fija el mapa ruta-contenido de la temporada."""
+    existing = db.query(StageBest.route_position, StageBest.stage_id, StageBest.difficulty).filter(
         StageBest.user_id == user_id,
         StageBest.season_id == CURRENT_SEASON_ID,
     ).all()
-    positions = {row.route_position for row in existing if row.route_position is not None}
+    completed_on_difficulty = {
+        row.route_position
+        for row in existing
+        if row.route_position is not None and row.difficulty == difficulty
+    }
     mapping = {row.route_position: int(row.stage_id) for row in existing if row.route_position is not None}
     reverse_mapping = {int(row.stage_id): row.route_position for row in existing if row.route_position is not None}
 
-    if route_position > 1 and route_position - 1 not in positions:
+    if route_position > 1 and route_position - 1 not in completed_on_difficulty:
         raise HTTPException(status_code=409, detail="Complete the previous route stage before ranking this one")
     if route_position in mapping and mapping[route_position] != content_stage_id:
         raise HTTPException(status_code=409, detail="Route position is already linked to another content stage")
@@ -248,7 +253,13 @@ async def create_ranked_attempt(
         payload.difficulty,
         user.country if payload.route_position == 1 else None,
     )
-    validate_ranked_progression(db, user.id, payload.route_position, payload.content_stage_id)
+    validate_ranked_progression(
+        db,
+        user.id,
+        payload.route_position,
+        payload.content_stage_id,
+        payload.difficulty,
+    )
 
     season_profile = db.query(CareerSeasonProfile).filter(
         CareerSeasonProfile.user_id == user.id,
@@ -403,7 +414,13 @@ async def complete_ranked_attempt(
     now = utc_now()
     if now > attempt.expires_at:
         raise HTTPException(status_code=410, detail="Ranked attempt expired")
-    validate_ranked_progression(db, current_user.id, attempt.route_position, int(attempt.stage_id))
+    validate_ranked_progression(
+        db,
+        current_user.id,
+        attempt.route_position,
+        int(attempt.stage_id),
+        attempt.difficulty,
+    )
 
     answer_payload = _attempt_answers(db, attempt)
     elapsed_seconds = max(0, ceil((now - attempt.started_at).total_seconds()))

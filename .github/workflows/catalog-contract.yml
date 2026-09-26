@@ -1,0 +1,48 @@
+name: Catalog contract
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  fixture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Match backend sources to the committed contract
+        run: python3 tests/test_catalog_contract.py
+
+  cross:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v4
+        with:
+          path: backend
+
+      - name: Checkout app
+        uses: actions/checkout@v4
+        with:
+          repository: Enmanuel-Otero-Montano/Juego-de-Banderas
+          path: app
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/mobile/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install app dependencies
+        working-directory: app/mobile
+        run: npm ci
+
+      - name: Compare live catalogs and both committed contracts
+        working-directory: app/mobile
+        run: node scripts/check-catalog-contract.mjs --backend "${GITHUB_WORKSPACE}/backend"
