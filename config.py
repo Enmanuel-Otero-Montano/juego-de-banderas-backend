@@ -1,5 +1,6 @@
 # config.py
 from functools import lru_cache
+import re
 from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, field_validator, model_validator, SecretStr
@@ -35,6 +36,12 @@ class Settings(BaseSettings):
 
     VERIFICATION_LINK: str | None = None
     BASE_URL: str = "http://127.0.0.1:5500"
+    RACE_INVITE_BASE_URL: str | None = None
+    RACE_MODE_ENABLED: bool = False
+    # Huella de Play App Signing para publicar Android App Links. Puede quedar
+    # vacía mientras el modo multijugador siga detrás de feature flag.
+    ANDROID_APP_LINK_SHA256_CERT_FINGERPRINT: str | None = None
+    ANDROID_APP_LINK_PACKAGE_NAME: str = "com.enmanuelotero.atlasflags"
 
     # Daily Challenge
     DAILY_MAX_ATTEMPTS: int = Field(default=4, ge=3, le=6)
@@ -59,6 +66,24 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [o.strip() for o in v.split(",") if o.strip()]
         return v or []
+
+    @field_validator("ANDROID_APP_LINK_SHA256_CERT_FINGERPRINT")
+    @classmethod
+    def normalize_android_fingerprint(cls, value):
+        if value is None or not value.strip():
+            return None
+        normalized = value.strip().upper()
+        if not re.fullmatch(r"(?:[0-9A-F]{2}:){31}[0-9A-F]{2}", normalized):
+            raise ValueError("ANDROID_APP_LINK_SHA256_CERT_FINGERPRINT no es una huella SHA-256 válida.")
+        return normalized
+
+    @field_validator("ANDROID_APP_LINK_PACKAGE_NAME")
+    @classmethod
+    def validate_android_package_name(cls, value):
+        normalized = value.strip()
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+", normalized):
+            raise ValueError("ANDROID_APP_LINK_PACKAGE_NAME no es un applicationId válido.")
+        return normalized
 
     @model_validator(mode="after")
     def validate_cors(self):
@@ -91,6 +116,15 @@ class Settings(BaseSettings):
                 raise ValueError("VERIFICATION_LINK debe usar HTTPS en producción.")
             if not self.BASE_URL.startswith("https://"):
                 raise ValueError("BASE_URL debe usar HTTPS en producción.")
+            if self.RACE_MODE_ENABLED and (
+                not self.RACE_INVITE_BASE_URL
+                or not self.RACE_INVITE_BASE_URL.startswith("https://")
+            ):
+                raise ValueError("RACE_INVITE_BASE_URL HTTPS es obligatorio al habilitar Carrera.")
+            if self.RACE_MODE_ENABLED and not self.ANDROID_APP_LINK_SHA256_CERT_FINGERPRINT:
+                raise ValueError(
+                    "ANDROID_APP_LINK_SHA256_CERT_FINGERPRINT es obligatorio al habilitar Carrera."
+                )
             if self.ACCESS_TOKEN_EXPIRE_MINUTES != 30:
                 raise ValueError("ACCESS_TOKEN_EXPIRE_MINUTES debe ser 30 en producción.")
             if self.REFRESH_TOKEN_EXPIRE_DAYS != 30:

@@ -39,10 +39,11 @@ from PIL import Image
 from PIL import UnidentifiedImageError
 from io import BytesIO
 import warnings
+from contextlib import asynccontextmanager
 
 from repository import register_login
 from schemas import user_schema, token
-from routers import users, daily_challenge, health, career
+from routers import users, daily_challenge, health, career, race_rooms
 from db import database, models
 
 import jwt
@@ -69,7 +70,19 @@ def api_documentation_urls(environment: str) -> dict[str, str | None]:
     return {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
 
 
-app = FastAPI(**api_documentation_urls(settings.ENV))
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    should_run_race_tasks = settings.ENV != "production" or settings.RACE_MODE_ENABLED
+    if should_run_race_tasks:
+        await race_rooms.start_race_background_tasks()
+    try:
+        yield
+    finally:
+        if should_run_race_tasks:
+            await race_rooms.stop_race_background_tasks()
+
+
+app = FastAPI(**api_documentation_urls(settings.ENV), lifespan=lifespan)
 PUBLIC_PAGES_DIRECTORY = Path(__file__).with_name("public")
 
 # Configurar logging
@@ -154,6 +167,7 @@ app.include_router(users.user_router)
 app.include_router(daily_challenge.router)
 app.include_router(health.router)
 app.include_router(career.router)  # Career mode endpoints
+app.include_router(race_rooms.router)  # Private real-time Flag Races
 
 # === Handlers de error coherentes ===
 @app.exception_handler(StarletteHTTPException)

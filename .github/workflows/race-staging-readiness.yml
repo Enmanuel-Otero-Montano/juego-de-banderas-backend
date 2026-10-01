@@ -1,0 +1,75 @@
+name: Race staging readiness
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "alembic/**"
+      - "db/**"
+      - "routers/race_rooms.py"
+      - "schemas/race.py"
+      - "utils/race_rules.py"
+      - "scripts/*staging*.py"
+      - "tests/test_race_rooms.py"
+      - "config.py"
+      - "requirements*.txt"
+      - ".github/workflows/race-staging-readiness.yml"
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: atlas
+          POSTGRES_PASSWORD: atlas-test-password
+          POSTGRES_DB: atlas_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U atlas -d atlas_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ENV: test
+      SECRET_KEY: ci-only-secret-key-with-at-least-32-characters
+      DATABASE_URL: postgresql+psycopg2://atlas:atlas-test-password@127.0.0.1:5432/atlas_test
+      TEST_DATABASE_URL: postgresql+psycopg2://atlas:atlas-test-password@127.0.0.1:5432/atlas_test
+      ALLOWED_ORIGINS: '["http://testserver"]'
+      ACCESS_TOKEN_EXPIRE_MINUTES: "30"
+      REFRESH_TOKEN_EXPIRE_DAYS: "30"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Apply every migration to empty PostgreSQL
+        run: alembic upgrade head
+      - name: Confirm migration head
+        run: alembic current --check-heads
+      - name: Run backend suite including PostgreSQL concurrency
+        run: pytest -q
+      - name: Validate a production-like staging configuration
+        env:
+          ENV: production
+          SECRET_KEY: ci-staging-random-key-with-at-least-32-characters
+          BASE_URL: https://staging-atlasflags-ci.onrender.com
+          RACE_MODE_ENABLED: "true"
+          RACE_INVITE_BASE_URL: https://staging-atlasflags-api-ci.onrender.com
+          ANDROID_APP_LINK_PACKAGE_NAME: com.enmanuelotero.atlasflags.staging
+          ANDROID_APP_LINK_SHA256_CERT_FINGERPRINT: 01:23:45:67:89:AB:CD:EF:10:32:54:76:98:BA:DC:FE:01:23:45:67:89:AB:CD:EF:10:32:54:76:98:BA:DC:FE
+          SMTP_SERVER: smtp.atlasflags.app
+          SMTP_PORT: "587"
+          SENDER_EMAIL: staging@atlasflags.app
+          SENDER_PASSWORD: ci-staging-mail-password
+          VERIFICATION_LINK: https://staging-atlasflags-ci.onrender.com/verify-email?token=
+          WEB_CONCURRENCY: "1"
+        run: python scripts/validate_staging_config.py
+      - name: Compile staging utilities
+        run: python -m py_compile scripts/validate_staging_config.py scripts/smoke_race_staging.py

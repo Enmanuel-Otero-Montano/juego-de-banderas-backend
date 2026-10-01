@@ -40,6 +40,31 @@ def test_valid_production_settings_are_accepted():
     assert settings.REFRESH_TOKEN_EXPIRE_DAYS == 30
 
 
+def test_race_requires_https_invites_and_a_play_signing_fingerprint():
+    fingerprint = ":".join(["AB"] * 32)
+    settings = production_settings(
+        RACE_MODE_ENABLED=True,
+        RACE_INVITE_BASE_URL="https://api.atlas.example",
+        ANDROID_APP_LINK_SHA256_CERT_FINGERPRINT=fingerprint.lower(),
+        ANDROID_APP_LINK_PACKAGE_NAME="com.enmanuelotero.atlasflags.staging",
+    )
+    assert settings.ANDROID_APP_LINK_SHA256_CERT_FINGERPRINT == fingerprint
+    assert settings.ANDROID_APP_LINK_PACKAGE_NAME.endswith(".staging")
+
+    with pytest.raises(ValidationError):
+        production_settings(RACE_MODE_ENABLED=True, RACE_INVITE_BASE_URL="https://api.atlas.example")
+    with pytest.raises(ValidationError):
+        production_settings(
+            RACE_MODE_ENABLED=True,
+            RACE_INVITE_BASE_URL="http://api.atlas.example",
+            ANDROID_APP_LINK_SHA256_CERT_FINGERPRINT=fingerprint,
+        )
+    with pytest.raises(ValidationError):
+        production_settings(ANDROID_APP_LINK_SHA256_CERT_FINGERPRINT="not-a-sha256-fingerprint")
+    with pytest.raises(ValidationError):
+        production_settings(ANDROID_APP_LINK_PACKAGE_NAME="not a package")
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

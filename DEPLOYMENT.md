@@ -16,6 +16,11 @@ Copiar `.env.example` como `.env` únicamente en el servidor y completar:
 - `DATABASE_URL`: conexión `postgresql+psycopg2://...` con credenciales no incluidas en Git.
 - `ALLOWED_ORIGINS`: lista mínima; para la app Capacitor incluir `https://localhost`.
 - `BASE_URL`: URL HTTPS del frontend que recibe la confirmación de correo.
+- `RACE_MODE_ENABLED`: mantener en `false` hasta aplicar la migración y validar
+  Carrera con dos dispositivos; habilitarlo exige un solo proceso ASGI.
+- `RACE_INVITE_BASE_URL`: URL HTTPS pública de esta API, usada por `/race/<token>`.
+- `ANDROID_APP_LINK_SHA256_CERT_FINGERPRINT`: huella de Play App Signing que
+  publica `/.well-known/assetlinks.json`.
 - `DAILY_MAX_ATTEMPTS`: entre 3 y 6; el valor recomendado es 4.
 - `RATE_LIMIT_STORAGE_URI`: opcional. Una URI de Redis o Key Value permite que
   los límites sobrevivan reinicios y se compartan entre instancias. Para el
@@ -24,6 +29,22 @@ Copiar `.env.example` como `.env` únicamente en el servidor y completar:
 - SMTP y `VERIFICATION_LINK`: todos obligatorios en producción.
 
 La aplicación se niega a iniciar en producción si detecta wildcard CORS, HTTP, secreto débil, base no PostgreSQL o correo incompleto.
+
+## Staging de Carrera
+
+La preparación reproducible está documentada junto a la app en
+`mobile/STAGING.md`. En este repositorio:
+
+1. copiar `.env.staging.example` como las variables secretas del servicio;
+2. ejecutar `python scripts/validate_staging_config.py` durante el predeploy;
+3. ejecutar `alembic upgrade head` antes de iniciar la nueva versión;
+4. mantener exactamente una instancia y un worker;
+5. ejecutar `python scripts/smoke_race_staging.py` desde una máquina externa
+   con dos cuentas verificadas.
+
+El smoke test recorre salud, `assetlinks.json`, login, sala, dos WebSockets,
+ready, las 12 respuestas y el ganador. Las credenciales se reciben únicamente
+mediante variables de entorno y no se imprimen.
 
 ## Despliegue
 

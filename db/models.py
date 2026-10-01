@@ -35,6 +35,126 @@ class User(database.Base):
     refresh_sessions = relationship("AuthRefreshSession", back_populates="user", cascade="all, delete-orphan")
 
 
+# =============================================================================
+# FLAG RACE MULTIPLAYER
+# =============================================================================
+
+class FlagRaceRoom(database.Base):
+    __tablename__ = "flag_race_rooms"
+
+    id = Column(String(36), primary_key=True)
+    join_code_hash = Column(String(64), nullable=False, unique=True, index=True)
+    join_code_encrypted = Column(String, nullable=False)
+    join_token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    join_token_encrypted = Column(String, nullable=False)
+    owner_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    current_host_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    status = Column(String(16), nullable=False, default="waiting", index=True)
+    scope = Column(String(16), nullable=False, default="World")
+    difficulty = Column(String(16), nullable=False, default="normal")
+    is_persistent = Column(Boolean, nullable=False, default=False)
+    revision = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, nullable=False, default=utc_now)
+    last_activity_at = Column(DateTime, nullable=False, default=utc_now)
+    expires_at = Column(DateTime, nullable=False, index=True)
+
+    members = relationship("FlagRaceRoomMember", back_populates="room", cascade="all, delete-orphan")
+    rounds = relationship("FlagRaceRound", back_populates="room", cascade="all, delete-orphan")
+
+
+class FlagRaceRoomMember(database.Base):
+    __tablename__ = "flag_race_room_members"
+
+    room_id = Column(String(36), ForeignKey("flag_race_rooms.id", ondelete="CASCADE"), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    seat = Column(Integer, nullable=False)
+    role = Column(String(16), nullable=False, default="player")
+    is_ready = Column(Boolean, nullable=False, default=False)
+    is_connected = Column(Boolean, nullable=False, default=False)
+    intermission_state = Column(String(24), nullable=False, default="in_lobby")
+    joined_at = Column(DateTime, nullable=False, default=utc_now)
+    left_at = Column(DateTime, nullable=True)
+    last_activity_at = Column(DateTime, nullable=False, default=utc_now)
+
+    room = relationship("FlagRaceRoom", back_populates="members")
+    user = relationship("User")
+
+    __table_args__ = (
+        UniqueConstraint("room_id", "seat", name="uq_flag_race_room_seat"),
+        Index("ix_flag_race_member_user_active", "user_id", "left_at"),
+    )
+
+
+class FlagRaceRound(database.Base):
+    __tablename__ = "flag_race_rounds"
+
+    id = Column(String(36), primary_key=True)
+    room_id = Column(String(36), ForeignKey("flag_race_rooms.id", ondelete="CASCADE"), nullable=False, index=True)
+    round_number = Column(Integer, nullable=False)
+    status = Column(String(16), nullable=False, default="countdown", index=True)
+    ruleset_version = Column(Integer, nullable=False)
+    content_version = Column(Integer, nullable=False)
+    plan = Column(JSON().with_variant(JSONB, "postgresql"), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=utc_now)
+    starts_at = Column(DateTime, nullable=False)
+    deadline_at = Column(DateTime, nullable=False)
+    finished_at = Column(DateTime, nullable=True)
+    winner_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    finish_reason = Column(String(16), nullable=True)
+    revision = Column(Integer, nullable=False, default=1)
+
+    room = relationship("FlagRaceRoom", back_populates="rounds")
+    participants = relationship("FlagRaceParticipant", back_populates="round", cascade="all, delete-orphan")
+    events = relationship("FlagRaceAnswerEvent", back_populates="round", cascade="all, delete-orphan")
+
+    __table_args__ = (UniqueConstraint("room_id", "round_number", name="uq_flag_race_room_round_number"),)
+
+
+class FlagRaceParticipant(database.Base):
+    __tablename__ = "flag_race_participants"
+
+    round_id = Column(String(36), ForeignKey("flag_race_rounds.id", ondelete="CASCADE"), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    seat = Column(Integer, nullable=False)
+    progress = Column(Integer, nullable=False, default=0)
+    mistakes = Column(Integer, nullable=False, default=0)
+    expected_sequence = Column(Integer, nullable=False, default=1)
+    discarded_codes = Column(JSON().with_variant(JSONB, "postgresql"), nullable=False, default=list)
+    locked_until = Column(DateTime, nullable=True)
+    progress_reached_at = Column(DateTime, nullable=False, default=utc_now)
+    is_connected = Column(Boolean, nullable=False, default=True)
+    game_state = Column(String(16), nullable=False, default="racing")
+    joined_at = Column(DateTime, nullable=False, default=utc_now)
+    finished_at = Column(DateTime, nullable=True)
+    last_activity_at = Column(DateTime, nullable=False, default=utc_now)
+
+    round = relationship("FlagRaceRound", back_populates="participants")
+    user = relationship("User")
+
+    __table_args__ = (UniqueConstraint("round_id", "seat", name="uq_flag_race_participant_seat"),)
+
+
+class FlagRaceAnswerEvent(database.Base):
+    __tablename__ = "flag_race_answer_events"
+
+    event_id = Column(String(64), primary_key=True)
+    round_id = Column(String(36), ForeignKey("flag_race_rounds.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    sequence = Column(Integer, nullable=False)
+    country_code = Column(String(2), nullable=False)
+    selected_code = Column(String(2), nullable=False)
+    is_correct = Column(Boolean, nullable=False)
+    accepted_at = Column(DateTime, nullable=False, default=utc_now)
+    locked_until = Column(DateTime, nullable=True)
+
+    round = relationship("FlagRaceRound", back_populates="events")
+
+    __table_args__ = (
+        UniqueConstraint("round_id", "user_id", "sequence", name="uq_flag_race_answer_sequence"),
+        Index("ix_flag_race_answer_round_user", "round_id", "user_id"),
+    )
+
+
 class AuthRateLimit(database.Base):
     """Ventana compartida de intentos sensibles; la clave nunca contiene PII."""
     __tablename__ = "auth_rate_limits"
