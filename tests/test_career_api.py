@@ -8,6 +8,10 @@ os.environ["DATABASE_URL"] = "sqlite+pysqlite://"
 os.environ["ALLOWED_ORIGINS"] = '["http://testserver"]'
 os.environ["ACCESS_TOKEN_EXPIRE_MINUTES"] = "30"
 os.environ["REFRESH_TOKEN_EXPIRE_DAYS"] = "30"
+os.environ["SMTP_SERVER"] = ""
+os.environ["SENDER_EMAIL"] = ""
+os.environ["SENDER_PASSWORD"] = ""
+os.environ["VERIFICATION_LINK"] = ""
 
 import pytest
 import bcrypt
@@ -500,7 +504,8 @@ def test_legacy_daily_challenge_is_explicitly_retired():
     assert response.json()["message"] == "The legacy daily challenge was retired; use the mobile daily challenge"
 
 
-def test_registration_validates_credentials_and_normalizes_identity():
+def test_registration_validates_credentials_and_normalizes_identity(monkeypatch):
+    monkeypatch.setattr(backend_main, "send_verification_email", lambda *_args: False)
     short_password = registration_client.post(
         "/register",
         data={"username": "atlas2", "email": "captain@example.com", "password": "short"},
@@ -526,9 +531,46 @@ def test_registration_validates_credentials_and_normalizes_identity():
     assert created.status_code == 200
     assert created.json()["username"] == "atlas2"
     assert created.json()["email"] == "captain@example.com"
+    assert created.json()["verification_email_sent"] is False
     with TestingSessionLocal() as db:
         created_user = db.query(User).filter(User.username == "atlas2").one()
         assert created_user.hashed_password.startswith("$argon2id$")
+
+
+def test_registration_reports_verification_delivery_result(monkeypatch):
+    monkeypatch.setattr(backend_main, "SMTP_SERVER", "smtp.example")
+    monkeypatch.setattr(backend_main, "SMTP_PORT", 587)
+    monkeypatch.setattr(backend_main, "SENDER_EMAIL", "sender@example.com")
+    monkeypatch.setattr(backend_main, "SENDER_PASSWORD", "secret")
+    monkeypatch.setattr(backend_main, "VERIFICATION_LINK", "https://example.com/verify?token=")
+    monkeypatch.setattr(backend_main, "send_verification_email", lambda *_args: True)
+
+    created = registration_client.post(
+        "/register",
+        data={"username": "delivered", "email": "delivered@example.com", "password": "secure-pass"},
+    )
+
+    assert created.status_code == 200
+    assert created.json()["verification_email_sent"] is True
+
+
+def test_registration_survives_verification_delivery_failure(monkeypatch):
+    monkeypatch.setattr(backend_main, "SMTP_SERVER", "smtp.example")
+    monkeypatch.setattr(backend_main, "SMTP_PORT", 587)
+    monkeypatch.setattr(backend_main, "SENDER_EMAIL", "sender@example.com")
+    monkeypatch.setattr(backend_main, "SENDER_PASSWORD", "secret")
+    monkeypatch.setattr(backend_main, "VERIFICATION_LINK", "https://example.com/verify?token=")
+    monkeypatch.setattr(backend_main, "send_verification_email", lambda *_args: False)
+
+    created = registration_client.post(
+        "/register",
+        data={"username": "undelivered", "email": "undelivered@example.com", "password": "secure-pass"},
+    )
+
+    assert created.status_code == 200
+    assert created.json()["verification_email_sent"] is False
+    with TestingSessionLocal() as db:
+        assert db.query(User).filter(User.email == "undelivered@example.com").one()
 
 
 def test_successful_login_migrates_legacy_bcrypt_hash_to_argon2():

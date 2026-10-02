@@ -11,6 +11,7 @@ from fastapi.exceptions import RequestValidationError
 
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette import status as starlette_status
+from starlette.concurrency import run_in_threadpool
 
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -322,14 +323,27 @@ async def register_user(
 
     name = full_name if full_name else username
 
-    # En desarrollo local puede no haber SMTP configurado; el alta no debe
-    # fallar por eso. En producción se envía la verificación normalmente.
+    verification_email_sent = False
+    # El usuario ya fue creado. Esperamos el resultado del primer envío para
+    # que el cliente pueda distinguir entre "cuenta creada" y "correo enviado".
+    # La llamada SMTP se ejecuta fuera del event loop porque smtplib es bloqueante.
     if SMTP_SERVER and SMTP_PORT and SENDER_EMAIL and SENDER_PASSWORD and VERIFICATION_LINK:
         verification_token = create_email_verification_token(email)
-        background_tasks.add_task(send_verification_email, email, verification_token, name)
+        verification_email_sent = await run_in_threadpool(
+            send_verification_email,
+            email,
+            verification_token,
+            name,
+        )
     else:
         logger.warning("Registro creado sin correo de verificación: SMTP no configurado")
-    return new_user
+    return {
+        "id": new_user.id,
+        "email": new_user.email,
+        "username": new_user.username,
+        "full_name": new_user.full_name,
+        "verification_email_sent": verification_email_sent,
+    }
 
 
 def create_email_verification_token(email: str):
@@ -354,7 +368,7 @@ def create_password_reset_token(email: str, hashed_password: str) -> str:
     )
 
 
-def send_verification_email(email: str, token: str, name: str):
+def send_verification_email(email: str, token: str, name: str) -> bool:
     verification_link = f"{VERIFICATION_LINK}{token}"
     subject = "¡Bienvenido a Banderas, países y regiones! Verifica tu cuenta para comenzar"
     body = f"""
@@ -391,8 +405,11 @@ def send_verification_email(email: str, token: str, name: str):
             server.starttls()
             server.login(sender_email, sender_password)
             server.sendmail(sender_email, email, msg.as_string())
+        logger.info("Correo de verificación enviado")
+        return True
     except Exception:
         logger.exception("No se pudo enviar el correo de verificación")
+        return False
 
 
 def send_password_reset_email(email: str, reset_link: str, name: str):
