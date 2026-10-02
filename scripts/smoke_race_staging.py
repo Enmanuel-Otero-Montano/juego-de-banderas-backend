@@ -152,12 +152,14 @@ def main() -> None:
             subprotocols=["atlas-race-v1", f"auth.{encoded_token(first['access_token'])}"],
             open_timeout=HTTP_TIMEOUT,
             close_timeout=5,
+            legacy=True,
         )
         second_socket = connect(
             socket_url(room["id"]),
             subprotocols=["atlas-race-v1", f"auth.{encoded_token(second['access_token'])}"],
             open_timeout=HTTP_TIMEOUT,
             close_timeout=5,
+            legacy=True,
         )
         ready_message = json.dumps({"type": "ready", "ready": True, "protocol_version": 1})
         first_socket.send(ready_message)
