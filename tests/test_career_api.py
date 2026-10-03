@@ -625,8 +625,38 @@ def test_verification_resend_does_not_disclose_account_existence():
 
     assert known.status_code == unknown.status_code == 200
     assert known.json() == unknown.json() == {
-        "msg": "If the account requires verification, an email was sent"
+        "msg": "If the account requires verification, check the inbox for further instructions"
     }
+
+
+def test_verification_resend_attempts_delivery_before_replying(monkeypatch):
+    with TestingSessionLocal() as db:
+        user = db.query(User).filter(User.email == "atlas@example.com").one()
+        user.is_verified = False
+        db.commit()
+
+    monkeypatch.setattr(backend_main, "SMTP_SERVER", "smtp.example")
+    monkeypatch.setattr(backend_main, "SMTP_PORT", 587)
+    monkeypatch.setattr(backend_main, "SENDER_EMAIL", "sender@example.com")
+    monkeypatch.setattr(backend_main, "SENDER_PASSWORD", "secret")
+    monkeypatch.setattr(backend_main, "VERIFICATION_LINK", "https://example.com/verify?token=")
+    delivered_to = []
+    monkeypatch.setattr(backend_main, "send_verification_email", lambda email, *_args: delivered_to.append(email) or True)
+
+    response = registration_client.post("/resend-verification-email", json="atlas@example.com")
+
+    assert response.status_code == 200
+    assert delivered_to == ["atlas@example.com"]
+
+
+def test_email_verification_redirects_to_the_public_confirmation_page(monkeypatch):
+    monkeypatch.setattr(backend_main, "BASE_URL", "https://example.com/Juego-de-Banderas")
+    token = backend_main.create_email_verification_token("atlas@example.com")
+
+    response = registration_client.get(f"/verify-email?token={token}", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "https://example.com/Juego-de-Banderas/pages/successful-verification.html"
 
 
 def test_password_reset_does_not_disclose_account_existence_and_invalidates_used_link():

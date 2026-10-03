@@ -478,12 +478,18 @@ def resend_verification_email(
         if SMTP_SERVER and SMTP_PORT and SENDER_EMAIL and SENDER_PASSWORD and VERIFICATION_LINK:
             verification_token = create_email_verification_token(user.email)
             name = user.full_name if user.full_name else user.username
-            background_tasks.add_task(send_verification_email, user.email, verification_token, name)
+            # Esperar el resultado evita responder que se envió un correo cuando
+            # SMTP falló después de que la respuesta ya salió del servidor.
+            # La respuesta al cliente sigue siendo uniforme para no revelar si
+            # una dirección tiene cuenta.
+            delivered = send_verification_email(user.email, verification_token, name)
+            if not delivered:
+                logger.warning("No se pudo reenviar el correo de verificación")
         else:
             logger.warning("No se reenvió la verificación: SMTP no configurado")
 
     # Respuesta uniforme para no revelar si el correo tiene una cuenta.
-    return {"msg": "If the account requires verification, an email was sent"}
+    return {"msg": "If the account requires verification, check the inbox for further instructions"}
 
 
 @app.post("/password-reset/request")
@@ -732,7 +738,7 @@ async def login_for_access_token(
     logger.info("Login exitoso")
     if user and not user.is_verified:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
-                            detail={"message": "Usuario no verificado", "email": user.email},
+                            detail={"message": "Verificación de correo pendiente"},
                             headers={"WWW-Authenticate": "Bearer"})
     session_tokens = issue_token_pair(db, user)
     full_name = user.full_name if user.full_name else user.username
@@ -778,7 +784,7 @@ async def issue_token(
     if not user.is_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail={"message": "Usuario no verificado", "email": user.email},
+            detail={"message": "Verificación de correo pendiente"},
             headers={"WWW-Authenticate": "Bearer"},
         )
 
