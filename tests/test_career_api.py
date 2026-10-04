@@ -587,6 +587,41 @@ def test_registration_reports_verification_delivery_result(monkeypatch):
     assert created.json()["verification_email_sent"] is True
 
 
+def test_verification_email_supports_a_dedicated_smtp_username(monkeypatch):
+    calls = {}
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout):
+            calls["connection"] = (host, port, timeout)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def starttls(self):
+            calls["starttls"] = True
+
+        def login(self, username, password):
+            calls["login"] = (username, password)
+
+        def sendmail(self, sender, recipient, _message):
+            calls["sendmail"] = (sender, recipient)
+
+    monkeypatch.setattr(backend_main, "SMTP_SERVER", "smtp.resend.com")
+    monkeypatch.setattr(backend_main, "SMTP_PORT", 587)
+    monkeypatch.setattr(backend_main, "SMTP_USERNAME", "resend")
+    monkeypatch.setattr(backend_main, "SENDER_EMAIL", "no-reply@ofiul.com")
+    monkeypatch.setattr(backend_main, "SENDER_PASSWORD", "secret")
+    monkeypatch.setattr(backend_main, "VERIFICATION_LINK", "https://api.banderas.ofiul.com/verify-email?token=")
+    monkeypatch.setattr(backend_main.smtplib, "SMTP", FakeSMTP)
+
+    assert backend_main.send_verification_email("player@example.com", "token", "Player") is True
+    assert calls["login"] == ("resend", "secret")
+    assert calls["sendmail"] == ("no-reply@ofiul.com", "player@example.com")
+
+
 def test_registration_survives_verification_delivery_failure(monkeypatch):
     monkeypatch.setattr(backend_main, "SMTP_SERVER", "smtp.example")
     monkeypatch.setattr(backend_main, "SMTP_PORT", 587)

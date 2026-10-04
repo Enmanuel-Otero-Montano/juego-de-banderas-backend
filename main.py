@@ -229,6 +229,7 @@ ALGORITHM = settings.ALGORITHM
 SMTP_SERVER = settings.SMTP_SERVER
 SMTP_PORT = settings.SMTP_PORT
 SMTP_TIMEOUT_SECONDS = settings.SMTP_TIMEOUT_SECONDS
+SMTP_USERNAME = settings.SMTP_USERNAME
 SENDER_EMAIL = settings.SENDER_EMAIL
 SENDER_PASSWORD = settings.SENDER_PASSWORD.get_secret_value() if settings.SENDER_PASSWORD else None
 VERIFICATION_LINK = settings.VERIFICATION_LINK
@@ -403,6 +404,7 @@ def send_verification_email(email: str, token: str, name: str) -> bool:
     smtp_port = SMTP_PORT
     sender_email = SENDER_EMAIL
     sender_password = SENDER_PASSWORD
+    smtp_username = SMTP_USERNAME or sender_email
 
     msg = MIMEText(body)
     msg["Subject"] = subject
@@ -412,7 +414,7 @@ def send_verification_email(email: str, token: str, name: str) -> bool:
     try:
         with smtplib.SMTP(smtp_server, smtp_port, timeout=SMTP_TIMEOUT_SECONDS) as server:
             server.starttls()
-            server.login(sender_email, sender_password)
+            server.login(smtp_username, sender_password)
             server.sendmail(sender_email, email, msg.as_string())
         logger.info("Correo de verificación enviado")
         return True
@@ -444,7 +446,7 @@ def send_password_reset_email(email: str, reset_link: str, name: str):
     try:
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as server:
             server.starttls()
-            server.login(SENDER_EMAIL, SENDER_PASSWORD)
+            server.login(SMTP_USERNAME or SENDER_EMAIL, SENDER_PASSWORD)
             server.sendmail(SENDER_EMAIL, email, msg.as_string())
     except Exception:
         logger.exception("No se pudo enviar el correo de recuperación")

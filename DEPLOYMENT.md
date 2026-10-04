@@ -26,7 +26,9 @@ Copiar `.env.example` como `.env` únicamente en el servidor y completar:
   los límites sobrevivan reinicios y se compartan entre instancias. Para el
   lanzamiento inicial puede omitirse y usar memoria local; usar `rediss://`
   si la conexión no viaja por red privada.
-- SMTP y `VERIFICATION_LINK`: todos obligatorios en producción.
+- SMTP y `VERIFICATION_LINK`: todos obligatorios en producción. Si el proveedor
+  usa un nombre de usuario distinto del remitente (por ejemplo, Resend), definir
+  también `SMTP_USERNAME`; si se omite, se usa `SENDER_EMAIL` por compatibilidad.
 
 La aplicación se niega a iniciar en producción si detecta wildcard CORS, HTTP, secreto débil, base no PostgreSQL o correo incompleto.
 
