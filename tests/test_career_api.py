@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from types import SimpleNamespace
 
 os.environ["ENV"] = "test"
@@ -15,6 +16,7 @@ os.environ["VERIFICATION_LINK"] = ""
 
 import pytest
 import bcrypt
+from PIL import Image
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request
@@ -104,6 +106,13 @@ def answers(codes: list[str], correct_count: int | None = None):
         }
         for index, code in enumerate(codes)
     ]
+
+
+def avatar_upload():
+    image = Image.new("RGB", (2, 2), "green")
+    body = BytesIO()
+    image.save(body, format="PNG")
+    return {"profile_image": ("avatar.png", body.getvalue(), "image/png")}
 
 
 def create_attempt(stage_id: int, difficulty: str, route_position: int | None = None) -> dict:
@@ -472,6 +481,27 @@ def test_legacy_avatar_route_redirects_to_the_canonical_endpoint():
     assert response.headers["location"] == "/user/1/profile_image"
 
 
+def test_authenticated_user_can_replace_or_remove_their_avatar():
+    image = Image.new("RGB", (2, 2), "green")
+    body = BytesIO()
+    image.save(body, format="PNG")
+
+    uploaded = registration_client.put(
+        "/users/me/avatar",
+        files={"profile_image": ("avatar.png", body.getvalue(), "image/png")},
+    )
+
+    assert uploaded.status_code == 200
+    assert uploaded.json() == {"avatar_url": "/user/1/profile_image"}
+    assert registration_client.get("/user/1/profile_image").status_code == 200
+
+    removed = registration_client.put("/users/me/avatar", data={"delete_current_profile_image": "true"})
+
+    assert removed.status_code == 200
+    assert removed.json() == {"avatar_url": None}
+    assert registration_client.get("/user/1/profile_image").status_code == 404
+
+
 def test_api_documentation_is_disabled_in_production():
     assert backend_main.api_documentation_urls("production") == {
         "docs_url": None,
@@ -487,6 +517,7 @@ def test_public_privacy_and_account_deletion_pages_are_available():
 
     assert privacy.status_code == 200
     assert "Política de privacidad" in privacy.text
+    assert "Foto de perfil opcional" in privacy.text
     assert deletion.status_code == 200
     assert "Eliminar una cuenta" in deletion.text
 
@@ -535,6 +566,7 @@ def test_registration_validates_credentials_and_normalizes_identity(monkeypatch)
     with TestingSessionLocal() as db:
         created_user = db.query(User).filter(User.username == "atlas2").one()
         assert created_user.hashed_password.startswith("$argon2id$")
+        assert created_user.profile_image is None
 
 
 def test_registration_reports_verification_delivery_result(monkeypatch):
@@ -548,6 +580,7 @@ def test_registration_reports_verification_delivery_result(monkeypatch):
     created = registration_client.post(
         "/register",
         data={"username": "delivered", "email": "delivered@example.com", "password": "secure-pass"},
+        files=avatar_upload(),
     )
 
     assert created.status_code == 200
@@ -565,6 +598,7 @@ def test_registration_survives_verification_delivery_failure(monkeypatch):
     created = registration_client.post(
         "/register",
         data={"username": "undelivered", "email": "undelivered@example.com", "password": "secure-pass"},
+        files=avatar_upload(),
     )
 
     assert created.status_code == 200
@@ -649,14 +683,24 @@ def test_verification_resend_attempts_delivery_before_replying(monkeypatch):
     assert delivered_to == ["atlas@example.com"]
 
 
-def test_email_verification_redirects_to_the_public_confirmation_page(monkeypatch):
+def test_email_verification_redirects_to_the_public_confirmation_page_in_english_by_default(monkeypatch):
     monkeypatch.setattr(backend_main, "BASE_URL", "https://example.com/Juego-de-Banderas")
     token = backend_main.create_email_verification_token("atlas@example.com")
 
     response = registration_client.get(f"/verify-email?token={token}", follow_redirects=False)
 
     assert response.status_code == 307
-    assert response.headers["location"] == "https://example.com/Juego-de-Banderas/pages/successful-verification.html"
+    assert response.headers["location"] == "https://example.com/Juego-de-Banderas/pages/successful-verification.html?lang=en"
+
+
+def test_email_verification_redirects_using_the_language_embedded_in_the_token(monkeypatch):
+    monkeypatch.setattr(backend_main, "BASE_URL", "https://example.com/Juego-de-Banderas")
+    token = backend_main.create_email_verification_token("atlas@example.com", "pt")
+
+    response = registration_client.get(f"/verify-email?token={token}", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "https://example.com/Juego-de-Banderas/pages/successful-verification.html?lang=pt"
 
 
 def test_password_reset_does_not_disclose_account_existence_and_invalidates_used_link():

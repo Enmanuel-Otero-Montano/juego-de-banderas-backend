@@ -59,6 +59,14 @@ import sys
 
 from schemas.user_schema import UserRegisterResponse
 
+SUPPORTED_VERIFICATION_LANGUAGES = frozenset({"es", "en", "pt", "fr", "de"})
+
+
+def verification_language(value: object) -> str:
+    """Devuelve sólo idiomas que la página pública sabe representar."""
+    normalized = value.strip().lower() if isinstance(value, str) else ""
+    return normalized if normalized in SUPPORTED_VERIFICATION_LANGUAGES else "en"
+
 # Las migraciones de Alembic son la única autoridad de esquema en producción.
 # create_all se conserva en desarrollo/test para facilitar el arranque local.
 if settings.ENV != "production":
@@ -288,6 +296,7 @@ async def register_user(
     email: Annotated[EmailStr, Form()],
     password: Annotated[str, Form(min_length=8, max_length=128)],
     full_name: Annotated[Optional[str], Form(max_length=120)] = None,
+    language: Annotated[Optional[str], Form(max_length=5)] = None,
     profile_image: Annotated[Optional[UploadFile], File()] = None,
     db: Session = Depends(get_db)
 ):
@@ -328,7 +337,7 @@ async def register_user(
     # que el cliente pueda distinguir entre "cuenta creada" y "correo enviado".
     # La llamada SMTP se ejecuta fuera del event loop porque smtplib es bloqueante.
     if SMTP_SERVER and SMTP_PORT and SENDER_EMAIL and SENDER_PASSWORD and VERIFICATION_LINK:
-        verification_token = create_email_verification_token(email)
+        verification_token = create_email_verification_token(email, language)
         verification_email_sent = await run_in_threadpool(
             send_verification_email,
             email,
@@ -346,9 +355,9 @@ async def register_user(
     }
 
 
-def create_email_verification_token(email: str):
+def create_email_verification_token(email: str, language: object = None):
     expire = datetime.now(timezone.utc) + timedelta(hours=1)  # Token válido por 1 hora
-    to_encode = {"sub": email, "exp": expire}
+    to_encode = {"sub": email, "language": verification_language(language), "exp": expire}
     token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return token
 
@@ -460,7 +469,8 @@ def verify_email(token: str, db: Session = Depends(get_db)):
     # Marcar el usuario como verificado
     user.is_verified = True
     db.commit()
-    return RedirectResponse(f"{BASE_URL}/pages/successful-verification.html")
+    language = verification_language(payload.get("language"))
+    return RedirectResponse(f"{BASE_URL}/pages/successful-verification.html?lang={language}")
 
 
 @app.post("/resend-verification-email")
@@ -468,15 +478,17 @@ def verify_email(token: str, db: Session = Depends(get_db)):
 def resend_verification_email(
     request: Request,
     background_tasks: BackgroundTasks,
-    email: Annotated[EmailStr, Body()],
+    payload: Annotated[EmailStr | user_schema.VerificationEmailResendRequest, Body()],
     db: Session = Depends(get_db)
 ):
+    email = payload.email if isinstance(payload, user_schema.VerificationEmailResendRequest) else payload
+    language = payload.language if isinstance(payload, user_schema.VerificationEmailResendRequest) else None
     normalized_email = str(email).strip().lower()
     consume_auth_attempt(db, scope="resend", subject=normalized_email, client_ip=get_client_ip(request), maximum=3, window_seconds=3600)
     user = db.query(models.User).filter(models.User.email == normalized_email).first()
     if user and not user.is_verified:
         if SMTP_SERVER and SMTP_PORT and SENDER_EMAIL and SENDER_PASSWORD and VERIFICATION_LINK:
-            verification_token = create_email_verification_token(user.email)
+            verification_token = create_email_verification_token(user.email, language)
             name = user.full_name if user.full_name else user.username
             # Esperar el resultado evita responder que se envió un correo cuando
             # SMTP falló después de que la respuesta ya salió del servidor.
@@ -819,7 +831,7 @@ async def get_profile_image(user_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=400, detail="Invalid image file")
 
-    return Response(content=user.profile_image, media_type=media_type)
+    return Response(content=user.profile_image, media_type=media_type, headers={"Cache-Control": "public, max-age=300"})
 
 
 @app.get("/users/me", response_model=user_schema.UserMeResponse)
@@ -855,6 +867,29 @@ async def update_onboarding(
         return {"message": "Onboarding status updated successfully", "onboarding_completed": updated_user.onboarding_completed}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.put("/users/me/avatar")
+@limiter.limit("10/hour")
+async def update_my_avatar(
+    request: Request,
+    profile_image: Annotated[Optional[UploadFile], File()] = None,
+    delete_current_profile_image: Annotated[bool, Form()] = False,
+    current_user: Annotated[user_schema.User, Depends(get_current_active_user)] = None,
+    db: Session = Depends(get_db),
+):
+    """Actualiza sólo el avatar, sin exigir los campos del perfil heredado."""
+    if profile_image is None and not delete_current_profile_image:
+        raise HTTPException(status_code=422, detail="Provide a PNG or JPEG image, or request its removal")
+    if profile_image is not None and delete_current_profile_image:
+        raise HTTPException(status_code=422, detail="Provide an image or request its removal, not both")
+
+    user = db.query(models.User).filter(models.User.id == current_user.id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.profile_image = None if delete_current_profile_image else await read_valid_profile_image(profile_image)
+    db.commit()
+    return {"avatar_url": f"/user/{user.id}/profile_image" if user.profile_image else None}
 
 
 @app.put("/user/profile", response_model=user_schema.UserRegisterResponse)

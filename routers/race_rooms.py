@@ -147,6 +147,7 @@ def standings_for(db: Session, race_round: models.FlagRaceRound) -> list[dict]:
             "rank": current_rank,
             "user_id": participant.user_id,
             "display_name": display_name(participant.user),
+            "avatar_url": f"/user/{participant.user_id}/profile_image" if participant.user.profile_image else None,
             "progress": participant.progress,
             "mistakes": participant.mistakes,
             "finished_at": iso(participant.finished_at),
@@ -238,6 +239,7 @@ def room_snapshot(db: Session, room: models.FlagRaceRoom, user_id: int) -> dict:
         "members": [{
             "user_id": member.user_id,
             "display_name": display_name(member.user),
+            "avatar_url": f"/user/{member.user_id}/profile_image" if member.user.profile_image else None,
             "seat": member.seat,
             "role": "host" if member.user_id == room.current_host_user_id else "player",
             "ready": member.is_ready,

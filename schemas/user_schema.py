@@ -61,6 +61,12 @@ class ResendEmail(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class VerificationEmailResendRequest(BaseModel):
+    email: EmailStr
+    language: Optional[str] = Field(default=None, max_length=5)
+    model_config = ConfigDict(extra="forbid")
+
+
 class PasswordResetConfirm(BaseModel):
     token: str = Field(min_length=1, max_length=4096)
     password: str = Field(min_length=8, max_length=128)

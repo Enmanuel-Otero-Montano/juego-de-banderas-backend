@@ -36,6 +36,7 @@ class RaceRoomUpdate(BaseModel):
 class RaceMemberResponse(BaseModel):
     user_id: int
     display_name: str
+    avatar_url: str | None = None
     seat: int
     role: Literal["host", "player"]
     ready: bool
