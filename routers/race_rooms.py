@@ -36,6 +36,7 @@ from dependencies import get_current_active_user, get_db
 from schemas import user_schema
 from schemas.race import (
     RaceAnswerMessage,
+    RaceStartRequest,
     RaceIntermissionMessage,
     RaceRoomCreate,
     RaceRoomJoin,
@@ -198,6 +199,7 @@ def round_snapshot(db: Session, race_round: models.FlagRaceRound, user_id: int) 
     payload = {
         "id": race_round.id,
         "number": race_round.round_number,
+        "revision": race_round.room.revision,
         "status": race_round.status,
         "starts_at": iso(race_round.starts_at),
         "deadline_at": iso(race_round.deadline_at),
@@ -256,9 +258,12 @@ class RaceConnectionManager:
 
     async def connect(self, room_id: str, user_id: int, websocket: WebSocket) -> None:
         previous = self.connections[room_id].get(user_id)
-        if previous and previous is not websocket:
-            await previous.close(code=4001, reason="Reconnected elsewhere")
         self.connections[room_id][user_id] = websocket
+        if previous and previous is not websocket:
+            try:
+                await asyncio.wait_for(previous.close(code=4001, reason="Reconnected elsewhere"), timeout=1)
+            except Exception:
+                pass
 
     def disconnect(self, room_id: str, user_id: int, websocket: WebSocket) -> None:
         if self.connections.get(room_id, {}).get(user_id) is websocket:
@@ -275,14 +280,23 @@ class RaceConnectionManager:
         })
 
     async def broadcast(self, room_id: str, message_type: str, payload: dict, revision: int) -> None:
-        stale: list[tuple[int, WebSocket]] = []
-        for user_id, websocket in list(self.connections.get(room_id, {}).items()):
+        await self.send_many([
+            (user_id, websocket, payload)
+            for user_id, websocket in list(self.connections.get(room_id, {}).items())
+        ], message_type, revision)
+
+    async def send_many(self, deliveries: list[tuple[int, WebSocket, dict]], message_type: str, revision: int) -> None:
+        async def deliver(websocket: WebSocket, payload: dict) -> None:
             try:
-                await self.send(websocket, message_type, payload, revision)
+                await asyncio.wait_for(self.send(websocket, message_type, payload, revision), timeout=2)
             except Exception:
-                stale.append((user_id, websocket))
-        for user_id, websocket in stale:
-            self.disconnect(room_id, user_id, websocket)
+                # Let the socket's own cleanup update presence. One slow peer
+                # must neither hold up the other peers nor cancel the deadline.
+                try:
+                    await asyncio.wait_for(websocket.close(code=4000, reason="Slow connection"), timeout=1)
+                except Exception:
+                    pass
+        await asyncio.gather(*(deliver(websocket, payload) for _, websocket, payload in deliveries))
 
 
 race_connections = RaceConnectionManager()
@@ -456,7 +470,7 @@ async def update_race_room(
     room.last_activity_at = utc_now()
     db.commit()
     snapshot = room_snapshot(db, room, current_user.id)
-    await race_connections.broadcast(room.id, "lobby_state", {"room": snapshot}, room.revision)
+    await broadcast_lobby(db, room)
     return snapshot
 
 
@@ -483,12 +497,13 @@ async def leave_race_room(
     room.revision += 1
     room.last_activity_at = now
     db.commit()
-    await race_connections.broadcast(room.id, "lobby_state", {"room": None}, room.revision)
+    await broadcast_lobby(db, room)
 
 
 @router.post("/race-rooms/{room_id}/rounds", status_code=201)
 async def start_race_round(
     room_id: str,
+    payload: RaceStartRequest | None = None,
     current_user: user_schema.User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
     _: None = Depends(require_race_feature),
@@ -497,8 +512,13 @@ async def start_race_round(
     membership_or_404(db, room_id, current_user.id)
     if room.current_host_user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the host can start the race")
+    if room.status == "round_active":
+        # Retrying a start cannot allocate another round or move its timestamps.
+        return round_snapshot(db, current_round(db, room.id), current_user.id)
     if room.status != "waiting":
-        raise HTTPException(status_code=409, detail="A race is already active")
+        raise HTTPException(status_code=409, detail="Room is not waiting")
+    if payload and payload.expected_revision is not None and payload.expected_revision != room.revision:
+        raise HTTPException(status_code=409, detail="Lobby changed; refresh before starting")
     members = active_members(db, room.id)
     if not RACE_MIN_PLAYERS <= len(members) <= RACE_MAX_PLAYERS:
         raise HTTPException(status_code=409, detail="A race needs between 2 and 8 players")
@@ -538,15 +558,18 @@ async def start_race_round(
     room.revision += 1
     room.last_activity_at = now
     db.commit()
-    for member in members:
-        websocket = race_connections.connections.get(room.id, {}).get(member.user_id)
-        if websocket:
-            await race_connections.send(websocket, "countdown", {
-                "room_id": room.id,
-                "round": round_snapshot(db, race_round, member.user_id),
-            }, room.revision)
+    # Schedule before any network I/O. Delivery failure never removes expiry.
     schedule_round_deadline(room.id, race_round.id, race_round.deadline_at)
-    return round_snapshot(db, race_round, current_user.id)
+    response = round_snapshot(db, race_round, current_user.id)
+    revision = room.revision
+    deliveries = [
+        (member.user_id, websocket, {"room_id": room.id, "round": round_snapshot(db, race_round, member.user_id)})
+        for member in members
+        if (websocket := race_connections.connections.get(room.id, {}).get(member.user_id))
+    ]
+    db.rollback()  # End snapshot reads before awaiting network sends.
+    await race_connections.send_many(deliveries, "countdown", revision)
+    return response
 
 
 @router.get("/race-rooms/{room_id}/rounds/{round_id}/results")
@@ -584,10 +607,11 @@ async def finish_after_deadline(
     deadline_at: datetime,
     session_factory: Callable[[], Session] = SessionLocal,
 ) -> None:
-    delay = max(0.0, (deadline_at - utc_now()).total_seconds())
-    await asyncio.sleep(delay)
+    while (delay := (deadline_at - utc_now()).total_seconds()) > 0:
+        await asyncio.sleep(min(delay, 1.0))
     db = session_factory()
     try:
+        db.query(models.FlagRaceRoom).filter(models.FlagRaceRoom.id == room_id).with_for_update().first()
         race_round = db.query(models.FlagRaceRound).filter(models.FlagRaceRound.id == round_id).with_for_update().first()
         if not race_round or race_round.status in ("finished", "expired", "cancelled"):
             return
@@ -781,8 +805,13 @@ def websocket_user(db: Session, websocket: WebSocket) -> models.User | None:
 
 
 async def broadcast_lobby(db: Session, room: models.FlagRaceRoom) -> None:
-    for user_id, websocket in list(race_connections.connections.get(room.id, {}).items()):
-        await race_connections.send(websocket, "lobby_state", {"room": room_snapshot(db, room, user_id)}, room.revision)
+    revision = room.revision
+    deliveries = [
+        (user_id, websocket, {"room": room_snapshot(db, room, user_id)})
+        for user_id, websocket in list(race_connections.connections.get(room.id, {}).items())
+    ]
+    db.rollback()
+    await race_connections.send_many(deliveries, "lobby_state", revision)
 
 
 async def process_answer(db: Session, room: models.FlagRaceRoom, user: models.User, message: RaceAnswerMessage) -> tuple[str, dict]:
@@ -791,6 +820,8 @@ async def process_answer(db: Session, room: models.FlagRaceRoom, user: models.Us
     ).with_for_update().order_by(models.FlagRaceRound.round_number.desc()).first()
     if not race_round:
         raise HTTPException(status_code=409, detail="No active race")
+    if message.round_id is not None and message.round_id != race_round.id:
+        raise HTTPException(status_code=409, detail="Answer belongs to another round")
     participant = db.query(models.FlagRaceParticipant).filter(
         models.FlagRaceParticipant.round_id == race_round.id,
         models.FlagRaceParticipant.user_id == user.id,
@@ -811,10 +842,13 @@ async def process_answer(db: Session, room: models.FlagRaceRoom, user: models.Us
                 "standings": standings_for(db, race_round),
             }
         return "answer_result", {
+            "round_id": race_round.id,
             "event_id": duplicate.event_id,
             "correct": duplicate.is_correct,
-            "locked_until": iso(duplicate.locked_until),
+            "locked_until": iso(participant.locked_until),
             "progress": participant.progress,
+            "mistakes": participant.mistakes,
+            "discarded_codes": participant.discarded_codes or [],
             "expected_sequence": participant.expected_sequence,
         }
     if race_round.status not in ("countdown", "running"):
@@ -845,6 +879,7 @@ async def process_answer(db: Session, room: models.FlagRaceRoom, user: models.Us
     correct = selected_code == country_code
     locked_until = None
     if correct:
+        participant.locked_until = None
         participant.progress += 1
         participant.discarded_codes = []
         participant.progress_reached_at = now
@@ -878,6 +913,7 @@ async def process_answer(db: Session, room: models.FlagRaceRoom, user: models.Us
     db.commit()
     next_question = participant_plan(race_round.plan, race_round.id, user.id, SECRET)[participant.progress] if correct else None
     return "answer_result", {
+        "round_id": race_round.id,
         "event_id": message.event_id,
         "correct": correct,
         "locked_until": iso(locked_until),
@@ -911,7 +947,12 @@ async def race_socket(websocket: WebSocket, room_id: str):
         db.close()
         return
     await websocket.accept(subprotocol="atlas-race-v1")
-    await race_connections.connect(room_id, user.id, websocket)
+    user_id = user.id
+    db.rollback()
+    await race_connections.connect(room_id, user_id, websocket)
+    room = db.query(models.FlagRaceRoom).filter(models.FlagRaceRoom.id == room_id).with_for_update().first()
+    member = membership_or_404(db, room_id, user_id)
+    member.is_ready = False
     member.is_connected = True
     member.intermission_state = "in_lobby"
     member.last_activity_at = utc_now()
@@ -935,18 +976,36 @@ async def race_socket(websocket: WebSocket, room_id: str):
                 await websocket.close(code=4000, reason="Heartbeat timeout")
                 break
             try:
+                received_at = utc_now()
                 message = json.loads(raw)
+                if not isinstance(message, dict):
+                    raise ValueError("Expected a JSON object")
+                if race_connections.connections.get(room_id, {}).get(user_id) is not websocket:
+                    break
+                # The session lives as long as the socket, but its transaction
+                # and cached identities must not live across incoming frames.
+                db.rollback()
+                room = db.query(models.FlagRaceRoom).filter(models.FlagRaceRoom.id == room_id).with_for_update().first()
+                member = membership_or_404(db, room_id, user_id)
                 message_type = message.get("type")
                 if message.get("protocol_version") != PROTOCOL_VERSION:
                     raise HTTPException(status_code=409, detail="Unsupported race protocol")
                 if message_type == "heartbeat":
                     member.last_activity_at = utc_now()
                     db.commit()
-                    await race_connections.send(websocket, "heartbeat", {"server_time": iso(utc_now())}, room.revision)
+                    revision = room.revision
+                    db.rollback()
+                    await race_connections.send(websocket, "heartbeat", {
+                        "probe_id": str(message.get("probe_id", ""))[:64],
+                        "server_received_at": iso(received_at),
+                        "server_time": iso(utc_now()),
+                    }, revision)
                 elif message_type == "ready":
                     if room.status != "waiting":
                         raise HTTPException(status_code=409, detail="Race is not in the lobby")
-                    member.is_ready = bool(message.get("ready", True))
+                    if not isinstance(message.get("ready"), bool):
+                        raise ValueError("ready must be a boolean")
+                    member.is_ready = message["ready"]
                     member.intermission_state = "in_lobby"
                     room.revision += 1
                     db.commit()
@@ -971,7 +1030,7 @@ async def race_socket(websocket: WebSocket, room_id: str):
                     answer_times.append(monotonic_now)
                     answer = RaceAnswerMessage.model_validate({
                         key: message.get(key)
-                        for key in ("event_id", "sequence", "country_code", "selected_code")
+                        for key in ("round_id", "event_id", "sequence", "country_code", "selected_code")
                     })
                     response_type, payload = await process_answer(db, room, user, answer)
                     if response_type == "race_finished":
@@ -985,12 +1044,16 @@ async def race_socket(websocket: WebSocket, room_id: str):
                         } for item in db.query(models.FlagRaceParticipant).filter(
                             models.FlagRaceParticipant.round_id == current_round(db, room.id).id,
                         ).all()]
-                        await race_connections.broadcast(room.id, "progress", {"participants": progress}, room.revision)
+                        await race_connections.broadcast(room.id, "progress", {"round_id": current_round(db, room.id).id, "participants": progress}, room.revision)
                 elif message_type == "snapshot":
-                    await race_connections.send(websocket, "snapshot", {"room": room_snapshot(db, room, user.id)}, room.revision)
+                    snapshot = room_snapshot(db, room, user_id)
+                    revision = room.revision
+                    db.rollback()
+                    await race_connections.send(websocket, "snapshot", {"room": snapshot}, revision)
                 else:
                     raise HTTPException(status_code=422, detail="Unknown race message")
             except (ValueError, TypeError) as error:
+                db.rollback()
                 await race_connections.send(websocket, "error", {"code": "invalid_message", "message": str(error)}, room.revision)
             except HTTPException as error:
                 db.rollback()
@@ -998,12 +1061,20 @@ async def race_socket(websocket: WebSocket, room_id: str):
                     "code": f"http_{error.status_code}",
                     "message": str(error.detail),
                 }, room.revision)
+            finally:
+                db.rollback()
     except WebSocketDisconnect:
         pass
     finally:
-        race_connections.disconnect(room_id, user.id, websocket)
+        # An old socket closing after replacement cannot disconnect the new one.
+        if race_connections.connections.get(room_id, {}).get(user_id) is not websocket:
+            db.close()
+            return
+        race_connections.disconnect(room_id, user_id, websocket)
         try:
-            member = membership_or_404(db, room_id, user.id)
+            db.rollback()
+            room = db.query(models.FlagRaceRoom).filter(models.FlagRaceRoom.id == room_id).with_for_update().first()
+            member = membership_or_404(db, room_id, user_id)
             member.is_connected = False
             member.is_ready = False
             member.intermission_state = "in_lobby"

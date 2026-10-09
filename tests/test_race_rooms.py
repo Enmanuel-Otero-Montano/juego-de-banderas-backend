@@ -409,3 +409,167 @@ def test_websocket_authenticates_members_and_broadcasts_ready_state():
             second_state = second.receive_json()
             assert first_state["type"] == second_state["type"] == "lobby_state"
             assert next(member for member in first_state["room"]["members"] if member["user_id"] == 1)["ready"] is True
+
+@pytest.mark.parametrize("player_count", [2, 8])
+def test_staggered_ready_common_start_and_idempotent_retry(player_count, monkeypatch):
+    from routers import race_rooms
+    from utils.race_rules import RACE_COUNTDOWN_SECONDS, RACE_DURATION_SECONDS
+    scheduled = []
+    monkeypatch.setattr(race_rooms, "schedule_round_deadline", lambda *args: scheduled.append(args))
+    room = create_and_join_two_players()
+    for user_id in range(3, player_count + 1):
+        active_user["id"] = user_id
+        assert client.post("/race-rooms/join", json={"code": room["code"]}).status_code == 200
+    active_user["id"] = 1
+    for user_id in range(1, player_count + 1):
+        with TestingSessionLocal() as db:
+            member = db.query(FlagRaceRoomMember).filter_by(room_id=room["id"], user_id=user_id).one()
+            member.is_ready = member.is_connected = True
+            db.commit()
+        if user_id < player_count:
+            assert client.post(f"/race-rooms/{room['id']}/rounds").status_code == 409
+    before = utc_now()
+    first = client.post(f"/race-rooms/{room['id']}/rounds").json()
+    second = client.post(f"/race-rooms/{room['id']}/rounds").json()
+    assert first["id"] == second["id"]
+    assert first["starts_at"] == second["starts_at"]
+    assert len(scheduled) == 1
+    with TestingSessionLocal() as db:
+        stored = db.query(FlagRaceRound).one()
+        assert stored.starts_at >= before + timedelta(seconds=RACE_COUNTDOWN_SECONDS)
+        assert stored.deadline_at - stored.starts_at == timedelta(seconds=RACE_DURATION_SECONDS)
+        assert len(stored.participants) == player_count
+    for user_id in range(1, player_count + 1):
+        active_user["id"] = user_id
+        snapshot = client.get(f"/race-rooms/{room['id']}").json()["current_round"]
+        assert (snapshot["id"], snapshot["starts_at"], snapshot["deadline_at"]) == (first["id"], first["starts_at"], first["deadline_at"])
+
+
+def test_server_rejects_early_old_round_out_of_order_and_late_answers(monkeypatch):
+    from fastapi import HTTPException
+    from routers import race_rooms
+    room_payload = create_and_join_two_players()
+    race_payload = prepare_round(room_payload["id"])
+    with TestingSessionLocal() as db:
+        room = db.query(FlagRaceRoom).one()
+        race_round = db.query(FlagRaceRound).one()
+        player = db.query(FlagRaceParticipant).filter_by(user_id=1).one()
+        question = race_round.plan[0]
+        message = RaceAnswerMessage(round_id=race_payload["id"], event_id="timing-event-0000001", sequence=1,
+                                    country_code=question["country_code"], selected_code=question["country_code"])
+        monkeypatch.setattr(race_rooms, "utc_now", lambda: race_round.starts_at - timedelta(milliseconds=1))
+        with pytest.raises(HTTPException, match="countdown"):
+            asyncio.run(process_answer(db, room, player.user, message))
+        monkeypatch.setattr(race_rooms, "utc_now", lambda: race_round.starts_at)
+        with pytest.raises(HTTPException, match="another round"):
+            asyncio.run(process_answer(db, room, player.user, message.model_copy(update={"round_id": "old-round"})))
+        with pytest.raises(HTTPException, match="out of order"):
+            asyncio.run(process_answer(db, room, player.user, message.model_copy(update={"sequence": 2})))
+        _, first = asyncio.run(process_answer(db, room, player.user, message))
+        _, duplicate = asyncio.run(process_answer(db, room, player.user, message))
+        assert first["progress"] == duplicate["progress"] == 1
+        assert duplicate["expected_sequence"] == 2
+        assert duplicate["mistakes"] == 0
+        assert db.query(FlagRaceAnswerEvent).count() == 1
+        monkeypatch.setattr(race_rooms, "utc_now", lambda: race_round.deadline_at)
+        kind, final = asyncio.run(process_answer(db, room, player.user,
+            message.model_copy(update={"event_id": "timing-event-0000002", "sequence": 2})))
+        assert kind == "race_finished" and final["reason"] == "timeout"
+        assert db.query(FlagRaceAnswerEvent).count() == 1
+
+
+def test_clock_probe_echo_and_reconnection_preserve_official_time():
+    room = create_and_join_two_players()
+    started = prepare_round(room["id"])
+    for _ in range(2):
+        with client.websocket_connect(f"/race-rooms/{room['id']}/socket", subprotocols=socket_protocol(1)) as ws:
+            snapshot = ws.receive_json()["room"]
+            ws.receive_json()
+            assert snapshot["current_round"]["starts_at"] == started["starts_at"]
+            assert snapshot["current_round"]["deadline_at"] == started["deadline_at"]
+            assert snapshot["current_round"]["id"] == started["id"]
+            ws.send_json({"type": "heartbeat", "protocol_version": 1, "probe_id": "clock-probe-1"})
+            reply = ws.receive_json()
+            assert reply["probe_id"] == "clock-probe-1"
+            assert reply["server_received_at"] <= reply["server_time"]
+            ws.send_json({"type": "ready", "protocol_version": 1, "ready": True})
+            assert ws.receive_json()["type"] == "error"
+    active_user["id"] = 1
+    retry = client.post(f"/race-rooms/{room['id']}/rounds").json()
+    assert retry["id"] == started["id"]
+    assert retry["starts_at"] == started["starts_at"]
+
+
+def test_departure_before_start_and_stale_lobby_revision():
+    room = create_and_join_two_players()
+    active_user["id"] = 2
+    assert client.post(f"/race-rooms/{room['id']}/leave").status_code == 204
+    active_user["id"] = 1
+    assert client.post(f"/race-rooms/{room['id']}/rounds").status_code == 409
+    active_user["id"] = 3
+    client.post("/race-rooms/join", json={"code": room["code"]})
+    with TestingSessionLocal() as db:
+        for member in db.query(FlagRaceRoomMember).all():
+            member.is_connected = member.is_ready = True
+        db.commit()
+    active_user["id"] = 1
+    response = client.post(f"/race-rooms/{room['id']}/rounds", json={"expected_revision": room["revision"]})
+    assert response.status_code == 409
+    assert "Lobby changed" in response.json()["detail"]
+
+
+def test_slow_peer_does_not_delay_other_countdowns():
+    from routers.race_rooms import RaceConnectionManager
+
+    async def scenario():
+        release = asyncio.Event()
+        delivered = asyncio.Event()
+        class Peer:
+            def __init__(self, slow=False):
+                self.slow = slow
+            async def send_json(self, message):
+                if self.slow:
+                    await release.wait()
+                else:
+                    delivered.set()
+            async def close(self, **kwargs):
+                pass
+        manager = RaceConnectionManager()
+        manager.connections["room"] = {1: Peer(True), 2: Peer()}
+        task = asyncio.create_task(manager.broadcast("room", "countdown", {"starts_at": "shared"}, 3))
+        await asyncio.wait_for(delivered.wait(), timeout=0.5)
+        assert not task.done()
+        release.set()
+        await task
+    asyncio.run(scenario())
+
+
+def test_replacement_socket_does_not_inherit_ready_or_get_marked_disconnected():
+    room = create_and_join_two_players()
+    path = f"/race-rooms/{room['id']}/socket"
+    with client.websocket_connect(path, subprotocols=socket_protocol(1)) as first:
+        first.receive_json()
+        first.receive_json()
+        first.send_json({"type": "ready", "protocol_version": 1, "ready": True})
+        assert first.receive_json()["room"]["members"][0]["ready"] is True
+        with client.websocket_connect(path, subprotocols=socket_protocol(1)) as replacement:
+            snapshot = replacement.receive_json()["room"]
+            replacement.receive_json()
+            assert snapshot["members"][0]["connected"] is True
+            assert snapshot["members"][0]["ready"] is False
+            replacement.send_json({"type": "snapshot", "protocol_version": 1})
+            assert replacement.receive_json()["room"]["members"][0]["connected"] is True
+
+
+def test_setting_broadcast_keeps_each_recipient_identity():
+    room = create_and_join_two_players()
+    path = f"/race-rooms/{room['id']}/socket"
+    with client.websocket_connect(path, subprotocols=socket_protocol(1)) as first:
+        first.receive_json(); first.receive_json()
+        with client.websocket_connect(path, subprotocols=socket_protocol(2)) as second:
+            second.receive_json(); second.receive_json(); first.receive_json()
+            active_user["id"] = 1
+            response = client.patch(f"/race-rooms/{room['id']}", json={"difficulty": "hard"})
+            assert response.status_code == 200
+            assert first.receive_json()["room"]["current_user_id"] == 1
+            assert second.receive_json()["room"]["current_user_id"] == 2

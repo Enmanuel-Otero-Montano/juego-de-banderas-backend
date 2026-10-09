@@ -59,8 +59,14 @@ class RaceRoomResponse(BaseModel):
     current_round: dict | None = None
 
 
+class RaceStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int | None = Field(default=None, ge=0)
+
+
 class RaceAnswerMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    round_id: str | None = Field(default=None, min_length=1, max_length=64)
     event_id: str = Field(min_length=16, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     sequence: int = Field(ge=1, le=100)
     country_code: str = Field(min_length=2, max_length=2, pattern=r"^[A-Za-z]{2}$")
