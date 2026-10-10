@@ -502,6 +502,30 @@ def test_authenticated_user_can_replace_or_remove_their_avatar():
     assert registration_client.get("/user/1/profile_image").status_code == 404
 
 
+def test_avatar_accepts_a_file_larger_than_two_mebibytes_and_stores_an_optimized_jpeg():
+    # La imagen aleatoria evita la compresión extrema de una imagen plana y
+    # prueba el nuevo límite real de entrada, no sólo el redimensionado.
+    image = Image.frombytes("RGB", (1200, 1000), os.urandom(1200 * 1000 * 3))
+    source = BytesIO()
+    image.save(source, format="PNG")
+    source_bytes = source.getvalue()
+    assert 2 * 1024 * 1024 < len(source_bytes) <= backend_main.MAX_PROFILE_IMAGE_BYTES
+
+    uploaded = registration_client.put(
+        "/users/me/avatar",
+        files={"profile_image": ("large-avatar.png", source_bytes, "image/png")},
+    )
+
+    assert uploaded.status_code == 200, uploaded.text
+    with TestingSessionLocal() as db:
+        stored_image = db.query(User).filter(User.id == 1).first().profile_image
+    assert stored_image is not None
+    assert len(stored_image) < len(source_bytes)
+    with Image.open(BytesIO(stored_image)) as normalized:
+        assert normalized.format == "JPEG"
+        assert max(normalized.size) == backend_main.PROFILE_IMAGE_MAX_DIMENSION
+
+
 def test_api_documentation_is_disabled_in_production():
     assert backend_main.api_documentation_urls("production") == {
         "docs_url": None,

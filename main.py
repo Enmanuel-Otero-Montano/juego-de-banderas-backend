@@ -239,18 +239,22 @@ BASE_URL = settings.BASE_URL
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 password_hash = PasswordHash((Argon2Hasher(), BcryptHasher()))
 
-MAX_PROFILE_IMAGE_BYTES = 2 * 1024 * 1024
+MAX_PROFILE_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_PROFILE_IMAGE_PIXELS = 16_000_000
+PROFILE_IMAGE_MAX_DIMENSION = 512
+PROFILE_IMAGE_JPEG_QUALITY = 85
 PROFILE_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png"}
 PROFILE_IMAGE_FORMATS = {"JPEG", "PNG"}
 
 
 async def read_valid_profile_image(profile_image: UploadFile | None) -> bytes | None:
-    """Lee una imagen de perfil acotada y comprueba su formato real.
+    """Valida y normaliza una imagen de perfil antes de persistirla.
 
     El Content-Type del cliente no es suficiente: Pillow verifica la cabecera
     del archivo y el límite de píxeles evita imágenes comprimidas que ocupen
     poca memoria en tránsito pero se expandan excesivamente al procesarlas.
+    Las imágenes aceptadas se guardan como JPEG de hasta 512 px para no
+    conservar fotos originales de varios megabytes en PostgreSQL.
     """
     if profile_image is None:
         return None
@@ -259,7 +263,7 @@ async def read_valid_profile_image(profile_image: UploadFile | None) -> bytes | 
 
     image_content = await profile_image.read(MAX_PROFILE_IMAGE_BYTES + 1)
     if len(image_content) > MAX_PROFILE_IMAGE_BYTES:
-        raise HTTPException(status_code=413, detail="Profile image must be at most 2 MB")
+        raise HTTPException(status_code=413, detail="Profile image must be at most 5 MB")
     if not image_content:
         raise HTTPException(status_code=422, detail="Profile image cannot be empty")
 
@@ -277,7 +281,33 @@ async def read_valid_profile_image(profile_image: UploadFile | None) -> bytes | 
     except (Image.DecompressionBombError, UnidentifiedImageError, OSError, ValueError):
         raise HTTPException(status_code=422, detail="Invalid profile image")
 
-    return image_content
+    try:
+        # verify() deja el decodificador en un estado no reutilizable; se abre
+        # de nuevo para cargar y recomprimir el contenido validado.
+        with Image.open(BytesIO(image_content)) as image:
+            image.load()
+            if image.mode in {"RGBA", "LA"}:
+                background = Image.new("RGB", image.size, "white")
+                background.paste(image, mask=image.getchannel("A"))
+                image = background
+            elif image.mode != "RGB":
+                image = image.convert("RGB")
+
+            image.thumbnail(
+                (PROFILE_IMAGE_MAX_DIMENSION, PROFILE_IMAGE_MAX_DIMENSION),
+                Image.Resampling.LANCZOS,
+            )
+            normalized_image = BytesIO()
+            image.save(
+                normalized_image,
+                format="JPEG",
+                quality=PROFILE_IMAGE_JPEG_QUALITY,
+                optimize=True,
+                progressive=True,
+            )
+            return normalized_image.getvalue()
+    except (Image.DecompressionBombError, UnidentifiedImageError, OSError, ValueError):
+        raise HTTPException(status_code=422, detail="Invalid profile image")
 
 
 def get_db():
