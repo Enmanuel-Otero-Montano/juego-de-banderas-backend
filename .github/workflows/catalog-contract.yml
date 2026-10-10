@@ -27,6 +27,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Enmanuel-Otero-Montano/Juego-de-Banderas
+          # La app móvil se publica desde production; main es el sitio legado
+          # y no contiene mobile/package-lock.json.
+          ref: production
           path: app
 
       - uses: actions/setup-node@v4
