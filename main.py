@@ -36,7 +36,7 @@ from secrets import token_urlsafe
 from urllib.parse import quote
 from uuid import uuid4
 
-from PIL import Image
+from PIL import Image, ImageOps
 from PIL import UnidentifiedImageError
 from io import BytesIO
 import warnings
@@ -286,6 +286,10 @@ async def read_valid_profile_image(profile_image: UploadFile | None) -> bytes | 
         # de nuevo para cargar y recomprimir el contenido validado.
         with Image.open(BytesIO(image_content)) as image:
             image.load()
+            # Las cámaras suelen guardar la orientación en EXIF en lugar de
+            # girar los píxeles. Al recomprimir como JPEG ese metadato se
+            # pierde, por lo que hay que aplicarlo antes de guardar.
+            image = ImageOps.exif_transpose(image)
             if image.mode in {"RGBA", "LA"}:
                 background = Image.new("RGB", image.size, "white")
                 background.paste(image, mask=image.getchannel("A"))
