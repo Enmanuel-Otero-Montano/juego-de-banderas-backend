@@ -526,6 +526,27 @@ def test_avatar_accepts_a_file_larger_than_two_mebibytes_and_stores_an_optimized
         assert max(normalized.size) == backend_main.PROFILE_IMAGE_MAX_DIMENSION
 
 
+def test_avatar_applies_exif_orientation_before_normalizing():
+    image = Image.new("RGB", (20, 10), "green")
+    orientation = Image.Exif()
+    orientation[274] = 6  # 90° clockwise: pixels must be transposed on save.
+    source = BytesIO()
+    image.save(source, format="JPEG", exif=orientation)
+
+    uploaded = registration_client.put(
+        "/users/me/avatar",
+        files={"profile_image": ("rotated-avatar.jpg", source.getvalue(), "image/jpeg")},
+    )
+
+    assert uploaded.status_code == 200, uploaded.text
+    with TestingSessionLocal() as db:
+        stored_image = db.query(User).filter(User.id == 1).first().profile_image
+    with Image.open(BytesIO(stored_image)) as normalized:
+        assert normalized.format == "JPEG"
+        assert normalized.size == (10, 20)
+        assert normalized.getexif().get(274) is None
+
+
 def test_api_documentation_is_disabled_in_production():
     assert backend_main.api_documentation_urls("production") == {
         "docs_url": None,
