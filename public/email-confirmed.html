@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="{{LANGUAGE}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Correo confirmado — Banderas, Países y Regiones</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #073e3b; background: #f5faf6; }
+    body { min-height: 100vh; margin: 0; display: grid; place-items: center; padding: 24px; box-sizing: border-box; }
+    main { width: min(100%, 476px); background: #fff; border: 1px solid #d9e7dd; border-radius: 26px; padding: 38px 30px; text-align: center; box-shadow: 0 16px 42px #113c2f12; }
+    .check { width: 58px; height: 58px; border-radius: 50%; display: grid; place-items: center; margin: 0 auto 22px; background: #d5f9e5; color: #008c61; font-size: 34px; font-weight: 700; }
+    h1 { margin: 0 0 10px; font-size: clamp(1.7rem, 5vw, 2.2rem); line-height: 1.15; }
+    p { margin: 0; color: #41736c; font-size: 1.05rem; line-height: 1.55; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="check" aria-hidden="true">✓</div>
+    <h1 id="title">Email confirmed</h1>
+    <p id="message">Your account is ready. Return to the app and sign in with your username and password.</p>
+  </main>
+  <script>
+    const translations = {
+      es: ["Correo confirmado", "Tu cuenta ya está lista. Vuelve a la aplicación e inicia sesión con tu alias y contraseña."],
+      en: ["Email confirmed", "Your account is ready. Return to the app and sign in with your username and password."],
+      pt: ["E-mail confirmado", "A sua conta está pronta. Volte ao aplicativo e entre com seu nome de usuário e senha."],
+      fr: ["E-mail confirmé", "Votre compte est prêt. Retournez dans l’application et connectez-vous avec votre identifiant et votre mot de passe."],
+      de: ["E-Mail bestätigt", "Dein Konto ist bereit. Kehre zur App zurück und melde dich mit deinem Benutzernamen und Passwort an."]
+    };
+    const language = new URLSearchParams(location.search).get("lang");
+    const [title, message] = translations[language] || translations.en;
+    document.documentElement.lang = translations[language] ? language : "en";
+    document.title = `${title} — Banderas, Países y Regiones`;
+    document.getElementById("title").textContent = title;
+    document.getElementById("message").textContent = message;
+  </script>
+</body>
+</html>
