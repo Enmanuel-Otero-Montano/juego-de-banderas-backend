@@ -67,6 +67,11 @@ def verification_language(value: object) -> str:
     normalized = value.strip().lower() if isinstance(value, str) else ""
     return normalized if normalized in SUPPORTED_VERIFICATION_LANGUAGES else "en"
 
+
+def public_game_page(path: str) -> str:
+    """Construye una URL pública del juego desde su página canónica de Ofiul."""
+    return f"{BASE_URL.rstrip('/')}/{path.lstrip('/')}"
+
 # Las migraciones de Alembic son la única autoridad de esquema en producción.
 # create_all se conserva en desarrollo/test para facilitar el arranque local.
 if settings.ENV != "production":
@@ -506,18 +511,19 @@ def verify_email(token: str, db: Session = Depends(get_db)):
     user.is_verified = True
     db.commit()
     language = verification_language(payload.get("language"))
-    # La confirmación se muestra desde esta misma API HTTPS. No debemos
-    # reenviar a un sitio web de juego distinto: la aplicación Android es el
-    # destino real después de verificar el correo.
-    return RedirectResponse(f"/email-confirmed?lang={language}", status_code=status.HTTP_303_SEE_OTHER)
+    # La página que ve la persona pertenece al sitio público de Ofiul; la API
+    # sólo confirma el token y no expone infraestructura en la URL final.
+    return RedirectResponse(
+        public_game_page(f"email-confirmed/?lang={language}"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @app.get("/email-confirmed", response_class=HTMLResponse)
 def email_confirmed(lang: str = Query(default="en")):
-    """Página pública sin token para finalizar la verificación por correo."""
+    """Compatibilidad para enlaces previos; la página pública vive en Ofiul."""
     language = verification_language(lang)
-    page = PUBLIC_PAGES_DIRECTORY / "email-confirmed.html"
-    return HTMLResponse(page.read_text(encoding="utf-8").replace("{{LANGUAGE}}", language))
+    return RedirectResponse(public_game_page(f"email-confirmed/?lang={language}"), status_code=status.HTTP_303_SEE_OTHER)
 
 
 @app.post("/resend-verification-email")
