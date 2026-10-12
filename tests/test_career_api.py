@@ -763,30 +763,32 @@ def test_verification_resend_attempts_delivery_before_replying(monkeypatch):
     assert delivered_to == ["atlas@example.com"]
 
 
-def test_email_verification_redirects_to_the_secure_confirmation_page_in_english_by_default(monkeypatch):
+def test_email_verification_redirects_to_the_public_ofiul_confirmation_page_in_english_by_default(monkeypatch):
+    monkeypatch.setattr(backend_main, "BASE_URL", "https://ofiul.example/games/banderas-paises-y-regiones")
     token = backend_main.create_email_verification_token("atlas@example.com")
 
     response = registration_client.get(f"/verify-email?token={token}", follow_redirects=False)
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/email-confirmed?lang=en"
+    assert response.headers["location"] == "https://ofiul.example/games/banderas-paises-y-regiones/email-confirmed/?lang=en"
 
 
 def test_email_verification_redirects_using_the_language_embedded_in_the_token(monkeypatch):
+    monkeypatch.setattr(backend_main, "BASE_URL", "https://ofiul.example/games/banderas-paises-y-regiones")
     token = backend_main.create_email_verification_token("atlas@example.com", "pt")
 
     response = registration_client.get(f"/verify-email?token={token}", follow_redirects=False)
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/email-confirmed?lang=pt"
+    assert response.headers["location"] == "https://ofiul.example/games/banderas-paises-y-regiones/email-confirmed/?lang=pt"
 
 
-def test_email_confirmed_page_is_served_without_a_game_site_link():
-    response = registration_client.get("/email-confirmed?lang=es")
+def test_legacy_email_confirmation_route_redirects_to_the_public_ofiul_page(monkeypatch):
+    monkeypatch.setattr(backend_main, "BASE_URL", "https://ofiul.example/games/banderas-paises-y-regiones")
+    response = registration_client.get("/email-confirmed?lang=es", follow_redirects=False)
 
-    assert response.status_code == 200
-    assert "Correo confirmado" in response.text
-    assert "Ir al sitio del juego" not in response.text
+    assert response.status_code == 303
+    assert response.headers["location"] == "https://ofiul.example/games/banderas-paises-y-regiones/email-confirmed/?lang=es"
 
 
 def test_password_reset_does_not_disclose_account_existence_and_invalidates_used_link():

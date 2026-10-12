@@ -15,7 +15,9 @@ Copiar `.env.example` como `.env` únicamente en el servidor y completar:
 - `SECRET_KEY`: valor aleatorio de al menos 32 caracteres.
 - `DATABASE_URL`: conexión `postgresql+psycopg2://...` con credenciales no incluidas en Git.
 - `ALLOWED_ORIGINS`: lista mínima; para la app Capacitor incluir `https://localhost`.
-- `BASE_URL`: URL HTTPS del frontend que recibe la confirmación de correo.
+- `BASE_URL`: URL HTTPS canónica de la ficha pública del juego (por ejemplo,
+  `https://ofiul.com/games/banderas-paises-y-regiones`). Recibe la confirmación
+  de correo y genera enlaces públicos compartidos.
 - `RACE_MODE_ENABLED`: mantener en `false` hasta aplicar la migración y validar
   Carrera con dos dispositivos; habilitarlo exige un solo proceso ASGI.
 - `RACE_INVITE_BASE_URL`: URL HTTPS pública de esta API, usada por `/race/<token>`.
