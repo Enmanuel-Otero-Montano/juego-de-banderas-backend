@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from types import SimpleNamespace
 
@@ -36,6 +36,7 @@ from utils.auth_rate_limit import consume_auth_attempt
 from utils.client_ip import get_client_ip
 from utils.country_regions import COUNTRY_REGION
 import main as backend_main
+from repository import daily_challenge_repo
 
 
 engine = create_engine(
@@ -789,6 +790,20 @@ def test_legacy_email_confirmation_route_redirects_to_the_public_ofiul_page(monk
 
     assert response.status_code == 303
     assert response.headers["location"] == "https://ofiul.example/games/banderas-paises-y-regiones/email-confirmed/?lang=es"
+
+
+def test_daily_share_url_uses_the_public_game_page():
+    attempt = SimpleNamespace(solved=True, failed=False, attempts_used=2, guesses=[])
+    challenge = SimpleNamespace(date=date(2026, 10, 12))
+
+    _text, share_url = daily_challenge_repo.build_share_payload(
+        attempt,
+        challenge,
+        max_attempts=3,
+        base_url="https://ofiul.example/games/banderas-paises-y-regiones",
+    )
+
+    assert share_url == "https://ofiul.example/games/banderas-paises-y-regiones/?date=2026-10-12&utm_source=share"
 
 
 def test_password_reset_does_not_disclose_account_existence_and_invalidates_used_link():

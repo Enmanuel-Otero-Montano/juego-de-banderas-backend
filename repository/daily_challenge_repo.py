@@ -197,7 +197,9 @@ def build_share_payload(attempt: models.DailyAttempt, challenge: models.DailyCha
                 emojis.append("🟥")
     
     emoji_line = "".join(emojis)
-    share_url = f"{base_url}/daily-challenge.html?date={date_str}&utm_source=share"
+    # La app Android aloja el desafío; el enlace compartido debe abrir la ficha
+    # pública estable del juego y no una página web heredada que no se publica.
+    share_url = f"{base_url.rstrip('/')}/?date={date_str}&utm_source=share"
     share_text = f"Bandera Diaria {date_str}\n{score_display}/{max_attempts}\n{emoji_line}"
     
     return share_text, share_url
