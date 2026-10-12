@@ -506,7 +506,18 @@ def verify_email(token: str, db: Session = Depends(get_db)):
     user.is_verified = True
     db.commit()
     language = verification_language(payload.get("language"))
-    return RedirectResponse(f"{BASE_URL}/pages/successful-verification.html?lang={language}")
+    # La confirmación se muestra desde esta misma API HTTPS. No debemos
+    # reenviar a un sitio web de juego distinto: la aplicación Android es el
+    # destino real después de verificar el correo.
+    return RedirectResponse(f"/email-confirmed?lang={language}", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@app.get("/email-confirmed", response_class=HTMLResponse)
+def email_confirmed(lang: str = Query(default="en")):
+    """Página pública sin token para finalizar la verificación por correo."""
+    language = verification_language(lang)
+    page = PUBLIC_PAGES_DIRECTORY / "email-confirmed.html"
+    return HTMLResponse(page.read_text(encoding="utf-8").replace("{{LANGUAGE}}", language))
 
 
 @app.post("/resend-verification-email")
