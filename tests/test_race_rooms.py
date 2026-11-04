@@ -11,7 +11,7 @@ os.environ["ALLOWED_ORIGINS"] = '["http://testserver"]'
 
 import pytest
 import jwt
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -20,7 +20,7 @@ from sqlalchemy.pool import StaticPool
 from db.database import Base
 from db.models import FlagRaceAnswerEvent, FlagRaceParticipant, FlagRaceRoom, FlagRaceRoomMember, FlagRaceRound, User
 from dependencies import get_current_active_user, get_db
-from routers.race_rooms import process_answer, recover_race_state, router, run_race_maintenance_once, settings, utc_now
+from routers.race_rooms import finish_after_deadline, process_answer, recover_race_state, round_snapshot, router, run_race_maintenance_once, settings, utc_now
 from schemas.race import RaceAnswerMessage
 from utils.limiter import limiter
 from utils.race_rules import RACE_FLAGS_TOTAL, build_race_plan, participant_plan
@@ -88,6 +88,15 @@ def create_and_join_two_players() -> dict:
     joined = client.post("/race-rooms/join", json={"code": room["code"]})
     assert joined.status_code == 200, joined.text
     return joined.json()
+
+
+def create_and_join_players(count: int) -> dict:
+    room = create_and_join_two_players()
+    for user_id in range(3, count + 1):
+        active_user["id"] = user_id
+        joined = client.post("/race-rooms/join", json={"code": room["code"]})
+        assert joined.status_code == 200, joined.text
+    return room
 
 
 def prepare_round(room_id: str) -> dict:
@@ -249,6 +258,141 @@ def test_wrong_answer_locks_player_and_final_answer_closes_once():
         )))
         assert repeated_type == "race_finished"
         assert repeated["winner_user_id"] == 1
+
+
+@pytest.mark.parametrize("player_count", range(2, 9))
+def test_round_continues_until_podium_is_decided(player_count, monkeypatch):
+    from routers import race_rooms
+    payload = create_and_join_players(player_count)
+    prepare_round(payload["id"])
+    with TestingSessionLocal() as db:
+        room = db.query(FlagRaceRoom).one()
+        race = db.query(FlagRaceRound).one()
+        assert race.ruleset_version == 2
+        now = race.starts_at + timedelta(seconds=1)
+        monkeypatch.setattr(race_rooms, "utc_now", lambda: now)
+        players = {player.user_id: player for player in race.participants}
+        for player in players.values():
+            player.progress = RACE_FLAGS_TOTAL - 1
+        # Arrival wins even with more mistakes and a later seat number.
+        order = [2, 1, *range(3, player_count + 1)]
+        for index, user_id in enumerate(order):
+            players[user_id].mistakes = player_count - index
+        # A disconnection must not change the frozen participant count.
+        players[order[-1]].is_connected = False
+        required = min(3, player_count - 1)
+        arrivals = {}
+        question = race.plan[-1]
+        for position, user_id in enumerate(order[:required], start=1):
+            now += timedelta(seconds=1)
+            message = RaceAnswerMessage(
+                round_id=race.id, event_id=f"podium-final-event-{user_id}", sequence=1,
+                country_code=question["country_code"], selected_code=question["country_code"],
+            )
+            kind, result = asyncio.run(process_answer(db, room, players[user_id].user, message))
+            arrivals[user_id] = now
+            assert players[user_id].finished_at == now
+            assert race.winner_user_id == 2
+            duplicate_kind, duplicate = asyncio.run(process_answer(db, room, players[user_id].user, message))
+            assert duplicate_kind == kind
+            if position < required:
+                assert kind == "answer_result"
+                assert result["progress"] == duplicate["progress"] == RACE_FLAGS_TOTAL
+                assert result["next_question"] is None
+                assert race.status == "running" and room.status == "round_active"
+                snapshot = round_snapshot(db, race, user_id)
+                assert snapshot["participant"]["progress"] == RACE_FLAGS_TOTAL
+                assert snapshot["plan"] and "standings" not in snapshot
+                assert snapshot["deadline_at"] == race_rooms.iso(race.deadline_at)
+                with pytest.raises(HTTPException, match="already finished"):
+                    asyncio.run(process_answer(db, room, players[user_id].user,
+                        message.model_copy(update={"event_id": f"podium-extra-event-{user_id}", "sequence": 2})))
+            else:
+                assert kind == "race_finished"
+                assert result["winner_user_id"] == duplicate["winner_user_id"] == 2
+                assert race.status == "finished" and room.status == "waiting"
+                assert [item["user_id"] for item in result["standings"][:required]] == order[:required]
+                assert [item["rank"] for item in result["standings"][:required]] == list(range(1, required + 1))
+        for user_id, arrived_at in arrivals.items():
+            assert players[user_id].finished_at == arrived_at
+        for user_id in order[required:]:
+            assert players[user_id].finished_at is None
+            with pytest.raises(HTTPException, match="No active race"):
+                asyncio.run(process_answer(db, room, players[user_id].user, RaceAnswerMessage(
+                    event_id=f"podium-late-event-{user_id}", sequence=1,
+                    country_code=question["country_code"], selected_code=question["country_code"],
+                )))
+        assert db.query(FlagRaceAnswerEvent).count() == required
+
+
+@pytest.mark.parametrize("close_via", ["answer", "deadline", "restart"])
+def test_timeout_preserves_arrivals_before_ranking_unfinished_players(close_via, monkeypatch):
+    from routers import race_rooms
+    payload = create_and_join_players(5)
+    prepare_round(payload["id"])
+    with TestingSessionLocal() as db:
+        room = db.query(FlagRaceRoom).one()
+        race = db.query(FlagRaceRound).one()
+        now = race.starts_at + timedelta(seconds=1)
+        monkeypatch.setattr(race_rooms, "utc_now", lambda: now)
+        players = {player.user_id: player for player in race.participants}
+        for user_id in (2, 1):
+            player = players[user_id]
+            player.progress = RACE_FLAGS_TOTAL - 1
+            player.mistakes = 10 if user_id == 2 else 0
+            now += timedelta(seconds=1)
+            question = race.plan[-1]
+            kind, _ = asyncio.run(process_answer(db, room, player.user, RaceAnswerMessage(
+                event_id=f"timeout-finish-event-{user_id}", sequence=1,
+                country_code=question["country_code"], selected_code=question["country_code"],
+            )))
+            assert kind == "answer_result"
+        players[3].progress, players[3].mistakes = 10, 2
+        players[4].progress, players[4].mistakes = 10, 1
+        players[5].progress, players[5].mistakes = 9, 0
+        db.commit()
+        round_id, room_id, deadline = race.id, room.id, race.deadline_at
+        arrivals = {user_id: players[user_id].finished_at for user_id in (2, 1)}
+        now = deadline
+        if close_via == "answer":
+            question = race.plan[players[3].progress]
+            kind, _ = asyncio.run(process_answer(db, room, players[3].user, RaceAnswerMessage(
+                event_id="timeout-final-event-3", sequence=1,
+                country_code=question["country_code"], selected_code=question["country_code"],
+            )))
+            assert kind == "race_finished"
+    if close_via == "deadline":
+        asyncio.run(finish_after_deadline(room_id, round_id, deadline, TestingSessionLocal))
+    elif close_via == "restart":
+        assert asyncio.run(recover_race_state(TestingSessionLocal))["expired_rounds"] == 1
+    with TestingSessionLocal() as db:
+        race = db.query(FlagRaceRound).one()
+        result = round_snapshot(db, race, 2)
+        assert result["status"] == "expired" and result["finish_reason"] == "timeout"
+        assert result["winner_user_id"] == 2
+        assert [item["user_id"] for item in result["standings"]] == [2, 1, 4, 3, 5]
+        assert [item["finished_at"] for item in result["standings"][:2]] == [race_rooms.iso(arrivals[user_id]) for user_id in (2, 1)]
+        assert all(item["finished_at"] is None for item in result["standings"][2:])
+
+
+def test_running_legacy_round_keeps_its_original_rules(monkeypatch):
+    from routers import race_rooms
+    payload = create_and_join_players(4)
+    prepare_round(payload["id"])
+    with TestingSessionLocal() as db:
+        room = db.query(FlagRaceRoom).one()
+        race = db.query(FlagRaceRound).one()
+        race.ruleset_version = 1
+        monkeypatch.setattr(race_rooms, "utc_now", lambda: race.starts_at + timedelta(seconds=1))
+        player = race.participants[0]
+        player.progress = RACE_FLAGS_TOTAL - 1
+        question = race.plan[-1]
+        kind, _ = asyncio.run(process_answer(db, room, player.user, RaceAnswerMessage(
+            event_id="legacy-final-event-1", sequence=1,
+            country_code=question["country_code"], selected_code=question["country_code"],
+        )))
+        assert kind == "race_finished"
+        assert round_snapshot(db, race, player.user_id)["ruleset_version"] == 1
 
 
 def test_rematch_reuses_room_and_members_with_a_new_plan():

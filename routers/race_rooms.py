@@ -131,17 +131,28 @@ def display_name(user: models.User) -> str:
     return user.ranking_alias or user.username
 
 
+def participant_rank_key(participant: models.FlagRaceParticipant) -> tuple:
+    # Finishers keep their arrival order, regardless of mistakes. Players still
+    # racing are ordered by progress, mistakes and when they reached that step.
+    return (
+        -participant.progress,
+        0 if participant.progress >= RACE_FLAGS_TOTAL else participant.mistakes,
+        participant.progress_reached_at,
+        participant.seat,
+    )
+
+
 def standings_for(db: Session, race_round: models.FlagRaceRound) -> list[dict]:
     participants = db.query(models.FlagRaceParticipant).filter(
         models.FlagRaceParticipant.round_id == race_round.id,
     ).all()
-    participants.sort(key=lambda item: (-item.progress, item.mistakes, item.progress_reached_at, item.seat))
+    participants.sort(key=participant_rank_key)
     standings: list[dict] = []
     previous_key = None
     current_rank = 0
     for index, participant in enumerate(participants, start=1):
         key = (participant.progress, participant.mistakes, participant.progress_reached_at)
-        if key != previous_key:
+        if participant.progress >= RACE_FLAGS_TOTAL or key != previous_key:
             current_rank = index
             previous_key = key
         standings.append({
@@ -172,8 +183,7 @@ def finish_round(db: Session, race_round: models.FlagRaceRound, reason: str, win
     race_round.winner_user_id = winner_user_id
     race_round.revision += 1
     for participant in race_round.participants:
-        participant.game_state = "finished" if participant.is_connected else "forfeited"
-        participant.finished_at = now
+        participant.game_state = "finished" if participant.finished_at or participant.is_connected else "forfeited"
     room = race_round.room
     room.status = "waiting"
     room.revision += 1
@@ -206,7 +216,8 @@ def round_snapshot(db: Session, race_round: models.FlagRaceRound, user_id: int) 
         "finished_at": iso(race_round.finished_at),
         "finish_reason": race_round.finish_reason,
         "winner_user_id": race_round.winner_user_id,
-        **race_versions(),
+        "ruleset_version": race_round.ruleset_version,
+        "content_version": race_round.content_version,
     }
     if participant:
         payload["participant"] = {
@@ -596,7 +607,7 @@ def timeout_winner(db: Session, round_id: str) -> int | None:
     ).all()
     ranked = sorted(
         participants,
-        key=lambda item: (-item.progress, item.mistakes, item.progress_reached_at, item.seat),
+        key=participant_rank_key,
     )
     return ranked[0].user_id if ranked and ranked[0].progress > 0 else None
 
@@ -857,7 +868,7 @@ async def process_answer(db: Session, room: models.FlagRaceRoom, user: models.Us
     if now < race_round.starts_at:
         raise HTTPException(status_code=409, detail="Race countdown is still active")
     if now >= race_round.deadline_at:
-        ranked = sorted(race_round.participants, key=lambda item: (-item.progress, item.mistakes, item.progress_reached_at, item.seat))
+        ranked = sorted(race_round.participants, key=participant_rank_key)
         winner = ranked[0].user_id if ranked and ranked[0].progress > 0 else None
         result = finish_round(db, race_round, "timeout", winner)
         db.commit()
@@ -907,11 +918,19 @@ async def process_answer(db: Session, room: models.FlagRaceRoom, user: models.Us
     room.revision += 1
     if participant.progress == RACE_FLAGS_TOTAL:
         participant.finished_at = now
-        result = finish_round(db, race_round, "completed", user.id)
-        db.commit()
-        return "race_finished", result
+        participant.game_state = "finished"
+        if race_round.winner_user_id is None:
+            race_round.winner_user_id = user.id
+        participants = race_round.participants
+        # Count the frozen roster, including disconnected players. Rounds that
+        # started on ruleset 1 retain their original immediate-close rule.
+        required = min(3, len(participants) - 1) if race_round.ruleset_version >= 2 else 1
+        if sum(item.progress >= RACE_FLAGS_TOTAL for item in participants) >= required:
+            result = finish_round(db, race_round, "completed", race_round.winner_user_id)
+            db.commit()
+            return "race_finished", result
     db.commit()
-    next_question = participant_plan(race_round.plan, race_round.id, user.id, SECRET)[participant.progress] if correct else None
+    next_question = participant_plan(race_round.plan, race_round.id, user.id, SECRET)[participant.progress] if correct and participant.progress < RACE_FLAGS_TOTAL else None
     return "answer_result", {
         "round_id": race_round.id,
         "event_id": message.event_id,

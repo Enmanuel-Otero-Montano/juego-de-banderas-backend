@@ -10,7 +10,7 @@ from collections.abc import Iterable
 from utils.career_rules import CURRENT_CONTENT_VERSION
 from utils.country_regions import REGION_COUNTRY_CODES
 
-RACE_RULESET_VERSION = 1
+RACE_RULESET_VERSION = 2
 RACE_FLAGS_TOTAL = 12
 RACE_DURATION_SECONDS = 90
 RACE_COUNTDOWN_SECONDS = 5

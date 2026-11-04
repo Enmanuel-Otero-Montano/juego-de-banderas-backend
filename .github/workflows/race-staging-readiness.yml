@@ -11,6 +11,8 @@ on:
       - "utils/race_rules.py"
       - "scripts/*staging*.py"
       - "tests/test_race_rooms.py"
+      - "tests/test_race_postgres_concurrency.py"
+      - "tests/test_career_ranking_postgres_concurrency.py"
       - "config.py"
       - "requirements*.txt"
       - ".github/workflows/race-staging-readiness.yml"
@@ -36,7 +38,8 @@ jobs:
       ENV: test
       SECRET_KEY: ci-only-secret-key-with-at-least-32-characters
       DATABASE_URL: postgresql+psycopg2://atlas:atlas-test-password@127.0.0.1:5432/atlas_test
-      TEST_DATABASE_URL: postgresql+psycopg2://atlas:atlas-test-password@127.0.0.1:5432/atlas_test
+      TEST_DATABASE_URL: postgresql+psycopg2://atlas:atlas-test-password@127.0.0.1:5432/atlas_ranking_test
+      RACE_TEST_DATABASE_URL: postgresql+psycopg2://atlas:atlas-test-password@127.0.0.1:5432/atlas_race_test
       ALLOWED_ORIGINS: '["http://testserver"]'
       ACCESS_TOKEN_EXPIRE_MINUTES: "30"
       REFRESH_TOKEN_EXPIRE_DAYS: "30"
@@ -49,6 +52,20 @@ jobs:
           cache-dependency-path: requirements.txt
       - name: Install dependencies
         run: pip install -r requirements.txt
+      - name: Create isolated databases for concurrency tests
+        run: |
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine
+
+          # Migration checks populate atlas_test. Concurrency fixtures need
+          # separate disposable databases, including an empty public schema.
+          engine = create_engine(os.environ["DATABASE_URL"], isolation_level="AUTOCOMMIT")
+          with engine.connect() as connection:
+              connection.exec_driver_sql("CREATE DATABASE atlas_ranking_test")
+              connection.exec_driver_sql("CREATE DATABASE atlas_race_test")
+          engine.dispose()
+          PY
       - name: Apply every migration to empty PostgreSQL
         run: alembic upgrade head
       - name: Confirm migration head
