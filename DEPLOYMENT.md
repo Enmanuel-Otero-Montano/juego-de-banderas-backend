@@ -50,6 +50,28 @@ El smoke test recorre salud, `assetlinks.json`, login, sala, dos WebSockets,
 ready, las 12 respuestas y el ganador. Las credenciales se reciben únicamente
 mediante variables de entorno y no se imprimen.
 
+### Actualizar la regla de cierre por podio
+
+El cierre de Carrera lo decide esta API. Publicar un APK nuevo por sí solo no
+activa la regla de podio: también hay que integrar y desplegar el backend con
+`RACE_RULESET_VERSION = 2`. Este cambio no requiere migraciones de base de datos.
+
+Después del despliegue, iniciar una ronda nueva y comprobar que el snapshot
+devuelve `current_round.ruleset_version = 2`. Las rondas ya iniciadas con la
+versión 1 conservan el cierre con la primera llegada.
+
+- Con 2 participantes, la primera llegada cierra la ronda.
+- Con 3 participantes, la primera llegada mantiene la ronda activa y la segunda
+  la cierra; la persona restante queda tercera.
+- Con 4–8 participantes, la tercera llegada cierra la ronda.
+- El límite original de 90 segundos continúa vigente; al vencer, se conservan
+  los puestos de quienes llegaron y se clasifica al resto por avance.
+
+No usar solo el smoke test de dos cuentas para validar este cambio: ese caso
+mantiene el mismo comportamiento en ambas versiones. Probar también una ronda
+de tres participantes y confirmar que la primera llegada recibe `answer_result`
+y progreso `12`, sin emitir `race_finished` hasta la segunda llegada o el plazo.
+
 ## Despliegue
 
 Con un entorno Python administrado por el proveedor:

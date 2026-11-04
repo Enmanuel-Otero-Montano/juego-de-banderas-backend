@@ -42,7 +42,7 @@ def sessions(monkeypatch):
         Base.metadata.create_all(engine)
         factory = sessionmaker(bind=engine)
         with factory() as db:
-            for user_id in (1, 2):
+            for user_id in range(1, 9):
                 db.add(User(id=user_id, email=f"{user_id}@example.test", username=f"player{user_id}", hashed_password="unused", is_active=True))
             db.flush()
             db.add(FlagRaceRoom(id="room", join_code_hash="code", join_code_encrypted="unused", join_token_hash="token", join_token_encrypted="unused",
@@ -110,3 +110,52 @@ def test_concurrent_final_answers_produce_one_winner(sessions):
         assert race.winner_user_id in (1, 2)
         assert race.status == "finished"
         assert db.query(FlagRaceAnswerEvent).count() == 1
+
+
+@pytest.mark.parametrize("player_count", [3, 4, 8])
+def test_concurrent_final_answers_fill_podium_once(sessions, player_count):
+    with sessions() as db:
+        for user_id in range(3, player_count + 1):
+            db.add(FlagRaceRoomMember(room_id="room", user_id=user_id, seat=user_id, is_ready=True, is_connected=True))
+        db.commit()
+        started = asyncio.run(race_rooms.start_race_round("room", current_user=SimpleNamespace(id=1), db=db))
+        race = db.query(FlagRaceRound).one()
+        race.starts_at = race_rooms.utc_now() - timedelta(seconds=10)
+        race.deadline_at = race_rooms.utc_now() + timedelta(seconds=80)
+        for participant in race.participants:
+            participant.progress = 11
+            participant.mistakes = participant.user_id
+        question = race.plan[-1]
+        db.commit()
+    barrier = Barrier(player_count)
+
+    def answer(user_id):
+        with sessions() as db:
+            barrier.wait(timeout=5)
+            room = db.query(FlagRaceRoom).filter_by(id="room").with_for_update().one()
+            user = db.query(User).filter_by(id=user_id).one()
+            message = RaceAnswerMessage(round_id=started["id"], event_id=f"podium-race-event-{user_id}", sequence=1,
+                                        country_code=question["country_code"], selected_code=question["country_code"])
+            try:
+                return asyncio.run(race_rooms.process_answer(db, room, user, message))
+            except HTTPException as error:
+                db.rollback()
+                return "rejected", error.status_code
+
+    with ThreadPoolExecutor(max_workers=player_count) as pool:
+        futures = [pool.submit(answer, user_id) for user_id in range(1, player_count + 1)]
+        results = [future.result(timeout=15) for future in futures]
+    required = min(3, player_count - 1)
+    kinds = [kind for kind, _ in results]
+    assert kinds.count("answer_result") == required - 1
+    assert kinds.count("race_finished") == 1
+    assert kinds.count("rejected") == player_count - required
+    with sessions() as db:
+        race = db.query(FlagRaceRound).one()
+        events = db.query(FlagRaceAnswerEvent).order_by(FlagRaceAnswerEvent.accepted_at).all()
+        standings = race_rooms.standings_for(db, race)
+        assert race.status == "finished"
+        assert len(events) == required
+        assert race.winner_user_id == events[0].user_id
+        assert [item["user_id"] for item in standings[:required]] == [event.user_id for event in events]
+        assert [item["rank"] for item in standings[:required]] == list(range(1, required + 1))
